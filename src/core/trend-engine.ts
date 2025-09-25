@@ -1,3 +1,4 @@
+import crypto from "crypto";
 import type { TradingConfig } from "../config";
 import type { ExchangeAdapter } from "../exchanges/adapter";
 import type {
@@ -27,6 +28,7 @@ import type { OrderLockMap, OrderPendingMap, OrderTimerMap } from "./order-coord
 import { isUnknownOrderError } from "../utils/errors";
 import { roundDownToTick } from "../utils/math";
 import { createTradeLog, type TradeLogEntry } from "../state/trade-log";
+import { decryptCopyright } from "../utils/copyright";
 
 export interface TrendEngineSnapshot {
   ready: boolean;
@@ -91,6 +93,10 @@ export class TrendEngine {
   private ordersSnapshotReady = false;
   private startupLogged = false;
   private entryPricePendingLogged = false;
+  private readonly copyrightFingerprint = crypto
+    .createHash("sha256")
+    .update(decryptCopyright())
+    .digest("hex");
 
   private readonly listeners = new Map<TrendEngineEvent, Set<TrendEngineListener>>();
 

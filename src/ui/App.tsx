@@ -1,8 +1,9 @@
-import React, { useState } from "react";
+import React, { useMemo, useState } from "react";
 import { Box, Text, useInput } from "ink";
 import { TrendApp } from "./TrendApp";
 import { MakerApp } from "./MakerApp";
 import { OffsetMakerApp } from "./OffsetMakerApp";
+import { loadCopyrightFragments, verifyCopyrightIntegrity } from "../utils/copyright";
 
 interface StrategyOption {
   id: "trend" | "maker" | "offset-maker";
@@ -37,6 +38,8 @@ const inputSupported = Boolean(process.stdin && (process.stdin as any).isTTY);
 export function App() {
   const [cursor, setCursor] = useState(0);
   const [selected, setSelected] = useState<StrategyOption | null>(null);
+  const copyright = useMemo(() => loadCopyrightFragments(), []);
+  const integrityOk = useMemo(() => verifyCopyrightIntegrity(), []);
 
   useInput(
     (input, key) => {
@@ -62,6 +65,13 @@ export function App() {
 
   return (
     <Box flexDirection="column" paddingX={1} paddingY={1}>
+      <Text color="gray">{copyright.bannerText}</Text>
+      {integrityOk ? null : (
+        <Text color="red">警告: 版权校验失败，当前版本可能被篡改。</Text>
+      )}
+      <Box height={1}>
+        <Text color="gray">────────────────────────────────────────────────────</Text>
+      </Box>
       <Text color="cyanBright">请选择要运行的策略</Text>
       <Text color="gray">使用 ↑/↓ 选择，回车开始，Ctrl+C 退出。</Text>
       <Box flexDirection="column" marginTop={1}>
