@@ -83,6 +83,11 @@ export class TrendEngine {
   private cancelAllRequested = false;
   private readonly pendingCancelOrders = new Set<number>();
 
+  // 控制入场频率：同一分钟内最多入场一次
+  private lastEntryMinute: number | null = null;
+  // 止损后冷却：止损发生后的 60s 内忽略 SMA 入场信号
+  private lastStopLossAt: number | null = null;
+
   private ordersSnapshotReady = false;
   private startupLogged = false;
   private entryPricePendingLogged = false;
@@ -287,6 +292,19 @@ export class TrendEngine {
 
   private async handleOpenPosition(currentPrice: number, currentSma: number): Promise<void> {
     this.entryPricePendingLogged = false;
+    const now = Date.now();
+    const currentMinute = Math.floor(now / 60_000);
+    // 止损后的冷却期：60s 内不允许基于 SMA 穿越再次入场
+    if (this.lastStopLossAt != null && now - this.lastStopLossAt < 60_000) {
+      const remaining = Math.max(0, 60_000 - (now - this.lastStopLossAt));
+      this.tradeLog.push("info", `止损后冷却中 ${(remaining / 1000).toFixed(0)}s，忽略入场信号`);
+      return;
+    }
+    // 同一分钟只允许一次入场
+    if (this.lastEntryMinute != null && this.lastEntryMinute === currentMinute) {
+      this.tradeLog.push("info", "本分钟已入场，忽略新的 SMA 入场信号");
+      return;
+    }
     if (this.lastPrice == null) {
       this.lastPrice = currentPrice;
       return;
@@ -313,8 +331,10 @@ export class TrendEngine {
     }
     if (this.lastPrice > currentSma && currentPrice < currentSma) {
       await this.submitMarketOrder("SELL", currentPrice, "下穿SMA30，市价开空");
+      this.lastEntryMinute = currentMinute;
     } else if (this.lastPrice < currentSma && currentPrice > currentSma) {
       await this.submitMarketOrder("BUY", currentPrice, "上穿SMA30，市价开多");
+      this.lastEntryMinute = currentMinute;
     }
   }
 
@@ -574,6 +594,8 @@ export class TrendEngine {
         { qtyStep: this.config.qtyStep }
         );
         this.tradeLog.push("close", `止损平仓: ${direction === "long" ? "SELL" : "BUY"}`);
+        // 记录止损时间以便短期内抑制再次入场
+        this.lastStopLossAt = Date.now();
       } catch (err) {
         if (isUnknownOrderError(err)) {
           this.tradeLog.push("order", "止损平仓时目标订单已不存在");
