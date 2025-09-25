@@ -387,33 +387,110 @@ export class TrendEngine {
       (o) => o.type === "TRAILING_STOP_MARKET" && o.side === stopSide
     );
 
-    const profitLockStopPrice = direction === "long"
-      ? roundDownToTick(
-          position.entryPrice + this.config.profitLockOffsetUsd / Math.abs(position.positionAmt),
-          this.config.priceTick
-        )
-      : roundDownToTick(
-          position.entryPrice - this.config.profitLockOffsetUsd / Math.abs(position.positionAmt),
-          this.config.priceTick
-        );
-
-    if (pnl > this.config.profitLockTriggerUsd || position.unrealizedProfit > this.config.profitLockTriggerUsd) {
+    // 步进式锁盈移动：在动态止盈生效前，盈利每增加一个 profitLockOffsetUsd 就上移/下移一次止损
+    {
       const tick = Math.max(1e-9, this.config.priceTick);
-      const profitLockValid =
-        (stopSide === "SELL" && profitLockStopPrice <= price - tick) ||
-        (stopSide === "BUY" && profitLockStopPrice >= price + tick);
-      if (profitLockValid) {
-        if (!currentStop) {
-          await this.tryPlaceStopLoss(stopSide, profitLockStopPrice, price);
-        } else {
-          const existingRaw = Number(currentStop.stopPrice);
-          const existingPrice = Number.isFinite(existingRaw) ? existingRaw : NaN;
-          const improves =
-            !Number.isFinite(existingPrice) ||
-            (stopSide === "SELL" && profitLockStopPrice >= existingPrice + tick) ||
-            (stopSide === "BUY" && profitLockStopPrice <= existingPrice - tick);
-          if (improves) {
-            await this.tryReplaceStop(stopSide, currentStop, profitLockStopPrice, price);
+      const qtyAbs = Math.abs(position.positionAmt);
+      const stepUsd = Math.max(0, this.config.profitLockOffsetUsd);
+      const triggerUsd = Math.max(0, this.config.profitLockTriggerUsd);
+      const trailingActivateFromOrderRaw = currentTrailing?.activatePrice ?? (currentTrailing as any)?.activationPrice;
+      const trailingActivateFromOrder = Number(trailingActivateFromOrderRaw);
+      const trailingActivate = Number.isFinite(trailingActivateFromOrder)
+        ? trailingActivateFromOrder
+        : activationPrice;
+
+      // 判断动态止盈是否已生效：多头 price >= activate；空头 price <= activate
+      const trailingActivated =
+        direction === "long"
+          ? Number.isFinite(trailingActivate) && price >= trailingActivate - tick
+          : Number.isFinite(trailingActivate) && price <= trailingActivate + tick;
+
+      // 仅在动态止盈未生效时执行步进移动
+      if (!trailingActivated && qtyAbs > 0 && stepUsd > 0) {
+        const basisProfit = Number.isFinite(unrealized ?? pnl) ? Math.max(pnl, unrealized ?? pnl) : pnl;
+        if (basisProfit >= triggerUsd) {
+          const over = basisProfit - triggerUsd;
+          const steps = 1 + Math.floor(over / stepUsd);
+          const stepPx = stepUsd / qtyAbs;
+          const rawTarget = direction === "long"
+            ? position.entryPrice + steps * stepPx
+            : position.entryPrice - steps * stepPx;
+          let targetStop = roundDownToTick(rawTarget, this.config.priceTick);
+
+          // 不允许下一次移动超过动态止盈订单的激活价
+          if (Number.isFinite(trailingActivate)) {
+            if (stopSide === "SELL" && targetStop >= trailingActivate - tick) {
+              // 达到或超过激活价，停止移动
+              targetStop = Math.min(targetStop, trailingActivate - tick);
+              // 若已经无法进一步改善，则不再尝试
+              const existingRaw = Number(currentStop?.stopPrice);
+              const existingPrice = Number.isFinite(existingRaw) ? existingRaw : NaN;
+              const canImprove =
+                !Number.isFinite(existingPrice) ||
+                (stopSide === "SELL" && targetStop >= existingPrice + tick);
+              if (!canImprove) {
+                // 直接跳过
+                // no-op
+              } else if (currentStop) {
+                await this.tryReplaceStop(stopSide, currentStop, targetStop, price);
+              } else {
+                await this.tryPlaceStopLoss(stopSide, targetStop, price);
+              }
+            } else if (stopSide === "BUY" && targetStop <= trailingActivate + tick) {
+              targetStop = Math.max(targetStop, trailingActivate + tick);
+              const existingRaw = Number(currentStop?.stopPrice);
+              const existingPrice = Number.isFinite(existingRaw) ? existingRaw : NaN;
+              const canImprove =
+                !Number.isFinite(existingPrice) ||
+                (stopSide === "BUY" && targetStop <= existingPrice - tick);
+              if (!canImprove) {
+                // no-op
+              } else if (currentStop) {
+                await this.tryReplaceStop(stopSide, currentStop, targetStop, price);
+              } else {
+                await this.tryPlaceStopLoss(stopSide, targetStop, price);
+              }
+            } else {
+              // 正常范围内，且必须与当前价方向不冲突
+              const validForSide =
+                (stopSide === "SELL" && targetStop <= price - tick) ||
+                (stopSide === "BUY" && targetStop >= price + tick);
+              if (validForSide) {
+                if (!currentStop) {
+                  await this.tryPlaceStopLoss(stopSide, targetStop, price);
+                } else {
+                  const existingRaw = Number(currentStop.stopPrice);
+                  const existingPrice = Number.isFinite(existingRaw) ? existingRaw : NaN;
+                  const improves =
+                    !Number.isFinite(existingPrice) ||
+                    (stopSide === "SELL" && targetStop >= existingPrice + tick) ||
+                    (stopSide === "BUY" && targetStop <= existingPrice - tick);
+                  if (improves) {
+                    await this.tryReplaceStop(stopSide, currentStop, targetStop, price);
+                  }
+                }
+              }
+            }
+          } else {
+            // 无法取得动态止盈激活价时，仅按普通步进逻辑
+            const validForSide =
+              (stopSide === "SELL" && targetStop <= price - tick) ||
+              (stopSide === "BUY" && targetStop >= price + tick);
+            if (validForSide) {
+              if (!currentStop) {
+                await this.tryPlaceStopLoss(stopSide, targetStop, price);
+              } else {
+                const existingRaw = Number(currentStop.stopPrice);
+                const existingPrice = Number.isFinite(existingRaw) ? existingRaw : NaN;
+                const improves =
+                  !Number.isFinite(existingPrice) ||
+                  (stopSide === "SELL" && targetStop >= existingPrice + tick) ||
+                  (stopSide === "BUY" && targetStop <= existingPrice - tick);
+                if (improves) {
+                  await this.tryReplaceStop(stopSide, currentStop, targetStop, price);
+                }
+              }
+            }
           }
         }
       }
