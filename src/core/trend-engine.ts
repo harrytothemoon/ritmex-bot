@@ -579,6 +579,7 @@ export class TrendEngine {
     );
 
     if (derivedLoss || snapshotLoss) {
+      const result = { closed: false, pnl };
       try {
         if (this.openOrders.length > 0) {
           const orderIdList = this.openOrders.map((order) => order.orderId);
@@ -636,6 +637,7 @@ export class TrendEngine {
         },
         { qtyStep: this.config.qtyStep }
         );
+        result.closed = true;
         this.tradeLog.push("close", `止损平仓: ${direction === "long" ? "SELL" : "BUY"}`);
         // 记录止损时间以便短期内抑制再次入场
         this.lastStopLossAt = Date.now();
@@ -645,8 +647,9 @@ export class TrendEngine {
         } else {
           this.tradeLog.push("error", `止损平仓失败: ${String(err)}`);
         }
+        return result;
       }
-      return { closed: true, pnl };
+      return result;
     }
 
     return { closed: false, pnl };
