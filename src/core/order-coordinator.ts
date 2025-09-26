@@ -60,7 +60,7 @@ export function lockOperating(
   timers[type] = setTimeout(() => {
     locks[type] = false;
     pendings[type] = null;
-    log("error", `${type} 操作超时自动解锁`);
+    log("info", `${type} 操作超时自动解锁`);
   }, timeout);
 }
 
