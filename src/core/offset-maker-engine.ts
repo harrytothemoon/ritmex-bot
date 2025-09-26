@@ -8,7 +8,7 @@ import type {
 } from "../exchanges/types";
 import { roundDownToTick } from "../utils/math";
 import { createTradeLog } from "../state/trade-log";
-import { isUnknownOrderError } from "../utils/errors";
+import { isUnknownOrderError, isRateLimitError } from "../utils/errors";
 import { getPosition, type PositionSnapshot } from "../utils/strategy";
 import { computeDepthStats } from "../utils/depth";
 import { computePositionPnl } from "../utils/pnl";
@@ -23,6 +23,7 @@ import type { OrderLockMap, OrderPendingMap, OrderTimerMap } from "./order-coord
 import type { MakerEngineSnapshot } from "./maker-engine";
 import { makeOrderPlan } from "./lib/order-plan";
 import { safeCancelOrder } from "./lib/orders";
+import { RateLimitController } from "./lib/rate-limit";
 
 interface DesiredOrder {
   side: "BUY" | "SELL";
@@ -68,6 +69,7 @@ export class OffsetMakerEngine {
   private initialOrderSnapshotReady = false;
   private initialOrderResetDone = false;
   private entryPricePendingLogged = false;
+  private readonly rateLimit: RateLimitController;
 
   private lastBuyDepthSum10 = 0;
   private lastSellDepthSum10 = 0;
@@ -77,6 +79,9 @@ export class OffsetMakerEngine {
 
   constructor(private readonly config: MakerConfig, private readonly exchange: ExchangeAdapter) {
     this.tradeLog = createTradeLog(this.config.maxLogEntries);
+    this.rateLimit = new RateLimitController(this.config.refreshIntervalMs, (type, detail) =>
+      this.tradeLog.push(type, detail)
+    );
     this.bootstrap();
   }
 
@@ -214,7 +219,16 @@ export class OffsetMakerEngine {
   private async tick(): Promise<void> {
     if (this.processing) return;
     this.processing = true;
+    let hadRateLimit = false;
     try {
+      const decision = this.rateLimit.beforeCycle();
+      if (decision === "paused") {
+        this.emitUpdate();
+        return;
+      }
+      if (decision === "skip") {
+        return;
+      }
       if (!this.isReady()) {
         this.emitUpdate();
         return;
@@ -249,13 +263,14 @@ export class OffsetMakerEngine {
       const askPrice = roundDownToTick(topAsk! + this.config.askOffset, this.config.priceTick);
       const absPosition = Math.abs(position.positionAmt);
       const desired: DesiredOrder[] = [];
+      const canEnter = !this.rateLimit.shouldBlockEntries();
 
       if (absPosition < EPS) {
         this.entryPricePendingLogged = false;
-        if (!skipBuySide) {
+        if (!skipBuySide && canEnter) {
           desired.push({ side: "BUY", price: bidPrice, amount: this.config.tradeAmount, reduceOnly: false });
         }
-        if (!skipSellSide) {
+        if (!skipSellSide && canEnter) {
           desired.push({ side: "SELL", price: askPrice, amount: this.config.tradeAmount, reduceOnly: false });
         }
       } else {
@@ -270,10 +285,50 @@ export class OffsetMakerEngine {
       await this.checkRisk(position, bidPrice, askPrice);
       this.emitUpdate();
     } catch (error) {
-      this.tradeLog.push("error", `偏移做市循环异常: ${String(error)}`);
+      if (isRateLimitError(error)) {
+        hadRateLimit = true;
+        this.rateLimit.registerRateLimit("offset-maker");
+        await this.enforceRateLimitStop();
+        this.tradeLog.push("warn", `OffsetMakerEngine 429: ${String(error)}`);
+      } else {
+        this.tradeLog.push("error", `偏移做市循环异常: ${String(error)}`);
+      }
       this.emitUpdate();
     } finally {
+      this.rateLimit.onCycleComplete(hadRateLimit);
       this.processing = false;
+    }
+  }
+
+  private async enforceRateLimitStop(): Promise<void> {
+    const position = getPosition(this.accountSnapshot, this.config.symbol);
+    if (Math.abs(position.positionAmt) < EPS) return;
+    await this.flushOrders();
+    const absPosition = Math.abs(position.positionAmt);
+    const side: "BUY" | "SELL" = position.positionAmt > 0 ? "SELL" : "BUY";
+    try {
+      await marketClose(
+        this.exchange,
+        this.config.symbol,
+        this.openOrders,
+        this.locks,
+        this.timers,
+        this.pending,
+        side,
+        absPosition,
+        (type, detail) => this.tradeLog.push(type, detail),
+        {
+          markPrice: position.markPrice,
+          expectedPrice: Number(side === "SELL" ? this.depthSnapshot?.bids?.[0]?.[0] : this.depthSnapshot?.asks?.[0]?.[0]) || null,
+          maxPct: this.config.maxCloseSlippagePct,
+        }
+      );
+    } catch (error) {
+      if (isUnknownOrderError(error)) {
+        this.tradeLog.push("order", "限频强制平仓时订单已不存在");
+      } else {
+        this.tradeLog.push("error", `限频强制平仓失败: ${String(error)}`);
+      }
     }
   }
 

@@ -29,6 +29,8 @@ import { isUnknownOrderError } from "../utils/errors";
 import { roundDownToTick } from "../utils/math";
 import { createTradeLog, type TradeLogEntry } from "../state/trade-log";
 import { decryptCopyright } from "../utils/copyright";
+import { isRateLimitError } from "../utils/errors";
+import { RateLimitController } from "./lib/rate-limit";
 
 export interface TrendEngineSnapshot {
   ready: boolean;
@@ -84,6 +86,7 @@ export class TrendEngine {
   private initializedPosition = false;
   private cancelAllRequested = false;
   private readonly pendingCancelOrders = new Set<number>();
+  private readonly rateLimit: RateLimitController;
 
   // 控制入场频率：同一分钟内最多入场一次
   private lastEntryMinute: number | null = null;
@@ -102,6 +105,9 @@ export class TrendEngine {
 
   constructor(private readonly config: TradingConfig, private readonly exchange: ExchangeAdapter) {
     this.tradeLog = createTradeLog(this.config.maxLogEntries);
+    this.rateLimit = new RateLimitController(this.config.pollIntervalMs, (type, detail) =>
+      this.tradeLog.push(type, detail)
+    );
     this.bootstrap();
   }
 
@@ -240,7 +246,16 @@ export class TrendEngine {
   private async tick(): Promise<void> {
     if (this.processing) return;
     this.processing = true;
+    let hadRateLimit = false;
     try {
+      const decision = this.rateLimit.beforeCycle();
+      if (decision === "paused") {
+        this.emitUpdate();
+        return;
+      }
+      if (decision === "skip") {
+        return;
+      }
       if (!this.ordersSnapshotReady) {
         this.emitUpdate();
         return;
@@ -259,7 +274,9 @@ export class TrendEngine {
       const position = getPosition(this.accountSnapshot, this.config.symbol);
 
       if (Math.abs(position.positionAmt) < 1e-5) {
-        await this.handleOpenPosition(price, sma30);
+        if (!this.rateLimit.shouldBlockEntries()) {
+          await this.handleOpenPosition(price, sma30);
+        }
       } else {
         const result = await this.handlePositionManagement(position, price);
         if (result.closed) {
@@ -273,10 +290,30 @@ export class TrendEngine {
       this.lastPrice = price;
       this.emitUpdate();
     } catch (error) {
-      this.tradeLog.push("error", `策略循环异常: ${String(error)}`);
+      if (isRateLimitError(error)) {
+        hadRateLimit = true;
+        this.rateLimit.registerRateLimit("trend");
+        await this.enforceRateLimitStop();
+        this.tradeLog.push("warn", `TrendEngine 429: ${String(error)}`);
+      } else {
+        this.tradeLog.push("error", `策略循环异常: ${String(error)}`);
+      }
       this.emitUpdate();
     } finally {
+      this.rateLimit.onCycleComplete(hadRateLimit);
       this.processing = false;
+    }
+  }
+
+  private async enforceRateLimitStop(): Promise<void> {
+    const position = getPosition(this.accountSnapshot, this.config.symbol);
+    if (Math.abs(position.positionAmt) < 1e-5) return;
+    const price = this.getReferencePrice() ?? Number(this.tickerSnapshot?.lastPrice) ?? this.lastPrice;
+    if (!Number.isFinite(price) || price == null) return;
+    const result = await this.handlePositionManagement(position, Number(price));
+    if (result.closed) {
+      this.totalTrades += 1;
+      this.totalProfit += result.pnl;
     }
   }
 

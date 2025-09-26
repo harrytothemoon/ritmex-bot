@@ -154,6 +154,7 @@ export interface AsterOrder {
   reduceOnly: boolean;
   closePosition: boolean;
   workingType?: string;
+  activationPrice?: string;
   avgPrice?: string;
   cumQuote?: string;
   origType?: string;

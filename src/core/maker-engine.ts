@@ -8,7 +8,7 @@ import type {
 } from "../exchanges/types";
 import { roundDownToTick } from "../utils/math";
 import { createTradeLog, type TradeLogEntry } from "../state/trade-log";
-import { isUnknownOrderError } from "../utils/errors";
+import { isUnknownOrderError, isRateLimitError } from "../utils/errors";
 import { getPosition, type PositionSnapshot } from "../utils/strategy";
 import { computePositionPnl } from "../utils/pnl";
 import { getTopPrices, getMidOrLast } from "../utils/price";
@@ -21,6 +21,7 @@ import {
 import type { OrderLockMap, OrderPendingMap, OrderTimerMap } from "./order-coordinator";
 import { makeOrderPlan } from "./lib/order-plan";
 import { safeCancelOrder } from "./lib/orders";
+import { RateLimitController } from "./lib/rate-limit";
 
 interface DesiredOrder {
   side: "BUY" | "SELL";
@@ -74,9 +75,13 @@ export class MakerEngine {
   private initialOrderSnapshotReady = false;
   private initialOrderResetDone = false;
   private entryPricePendingLogged = false;
+  private readonly rateLimit: RateLimitController;
 
   constructor(private readonly config: MakerConfig, private readonly exchange: ExchangeAdapter) {
     this.tradeLog = createTradeLog(this.config.maxLogEntries);
+    this.rateLimit = new RateLimitController(this.config.refreshIntervalMs, (type, detail) =>
+      this.tradeLog.push(type, detail)
+    );
     this.bootstrap();
   }
 
@@ -215,7 +220,16 @@ export class MakerEngine {
   private async tick(): Promise<void> {
     if (this.processing) return;
     this.processing = true;
+    let hadRateLimit = false;
     try {
+      const decision = this.rateLimit.beforeCycle();
+      if (decision === "paused") {
+        this.emitUpdate();
+        return;
+      }
+      if (decision === "skip") {
+        return;
+      }
       if (!this.isReady()) {
         this.emitUpdate();
         return;
@@ -237,11 +251,14 @@ export class MakerEngine {
       const position = getPosition(this.accountSnapshot, this.config.symbol);
       const absPosition = Math.abs(position.positionAmt);
       const desired: DesiredOrder[] = [];
+      const canEnter = !this.rateLimit.shouldBlockEntries();
 
       if (absPosition < EPS) {
         this.entryPricePendingLogged = false;
-        desired.push({ side: "BUY", price: bidPrice, amount: this.config.tradeAmount, reduceOnly: false });
-        desired.push({ side: "SELL", price: askPrice, amount: this.config.tradeAmount, reduceOnly: false });
+        if (canEnter) {
+          desired.push({ side: "BUY", price: bidPrice, amount: this.config.tradeAmount, reduceOnly: false });
+          desired.push({ side: "SELL", price: askPrice, amount: this.config.tradeAmount, reduceOnly: false });
+        }
       } else {
         const closeSide: "BUY" | "SELL" = position.positionAmt > 0 ? "SELL" : "BUY";
         const closePrice = closeSide === "SELL" ? askPrice : bidPrice;
@@ -254,11 +271,30 @@ export class MakerEngine {
       await this.checkRisk(position, bidPrice, askPrice);
       this.emitUpdate();
     } catch (error) {
-      this.tradeLog.push("error", `做市循环异常: ${String(error)}`);
+      if (isRateLimitError(error)) {
+        hadRateLimit = true;
+        this.rateLimit.registerRateLimit("maker");
+        await this.enforceRateLimitStop();
+        this.tradeLog.push("warn", `MakerEngine 429: ${String(error)}`);
+      } else {
+        this.tradeLog.push("error", `做市循环异常: ${String(error)}`);
+      }
       this.emitUpdate();
     } finally {
+      this.rateLimit.onCycleComplete(hadRateLimit);
       this.processing = false;
     }
+  }
+
+  private async enforceRateLimitStop(): Promise<void> {
+    const position = getPosition(this.accountSnapshot, this.config.symbol);
+    if (Math.abs(position.positionAmt) < EPS) return;
+    const { topBid, topAsk } = getTopPrices(this.depthSnapshot);
+    if (topBid == null || topAsk == null) return;
+    const bidPrice = roundDownToTick(topBid - this.config.bidOffset, this.config.priceTick);
+    const askPrice = roundDownToTick(topAsk + this.config.askOffset, this.config.priceTick);
+    await this.checkRisk(position, bidPrice, askPrice);
+    await this.flushOrders();
   }
 
   private async ensureStartupOrderReset(): Promise<boolean> {
