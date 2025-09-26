@@ -25,7 +25,7 @@ import {
   unlockOperating,
 } from "./order-coordinator";
 import type { OrderLockMap, OrderPendingMap, OrderTimerMap } from "./order-coordinator";
-import { isUnknownOrderError } from "../utils/errors";
+import { extractMessage, isUnknownOrderError } from "../utils/errors";
 import { roundDownToTick } from "../utils/math";
 import { createTradeLog, type TradeLogEntry } from "../state/trade-log";
 import { decryptCopyright } from "../utils/copyright";
@@ -153,7 +153,7 @@ export class TrendEngine {
           this.updateSessionVolume(position);
           this.emitUpdate();
         } catch (err) {
-          this.tradeLog.push("error", `账户推送处理异常: ${String(err)}`);
+          this.tradeLog.push("error", `账户推送处理异常: ${extractMessage(err)}`);
         }
       });
     } catch (err) {
@@ -178,7 +178,7 @@ export class TrendEngine {
           this.ordersSnapshotReady = true;
           this.emitUpdate();
         } catch (err) {
-          this.tradeLog.push("error", `订单推送处理异常: ${String(err)}`);
+          this.tradeLog.push("error", `订单推送处理异常: ${extractMessage(err)}`);
         }
       });
     } catch (err) {
@@ -190,7 +190,7 @@ export class TrendEngine {
           this.depthSnapshot = depth;
           this.emitUpdate();
         } catch (err) {
-          this.tradeLog.push("error", `深度推送处理异常: ${String(err)}`);
+          this.tradeLog.push("error", `深度推送处理异常: ${extractMessage(err)}`);
         }
       });
     } catch (err) {
@@ -202,7 +202,7 @@ export class TrendEngine {
           this.tickerSnapshot = ticker;
           this.emitUpdate();
         } catch (err) {
-          this.tradeLog.push("error", `价格推送处理异常: ${String(err)}`);
+          this.tradeLog.push("error", `价格推送处理异常: ${extractMessage(err)}`);
         }
       });
     } catch (err) {
@@ -214,7 +214,7 @@ export class TrendEngine {
           this.klineSnapshot = Array.isArray(klines) ? klines : [];
           this.emitUpdate();
         } catch (err) {
-          this.tradeLog.push("error", `K线推送处理异常: ${String(err)}`);
+          this.tradeLog.push("error", `K线推送处理异常: ${extractMessage(err)}`);
         }
       });
     } catch (err) {
@@ -300,8 +300,13 @@ export class TrendEngine {
       }
       this.emitUpdate();
     } finally {
-      this.rateLimit.onCycleComplete(hadRateLimit);
-      this.processing = false;
+      try {
+        this.rateLimit.onCycleComplete(hadRateLimit);
+      } catch (rateLimitError) {
+        this.tradeLog.push("error", `限频控制器状态更新失败: ${String(rateLimitError)}`);
+      } finally {
+        this.processing = false;
+      }
     }
   }
 
