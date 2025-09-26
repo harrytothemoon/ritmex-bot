@@ -168,6 +168,8 @@ export function MakerApp({ onExit }: MakerAppProps) {
         <Text>
           【总累计】Maker: {totalStats.makerCount}单 ｜ Taker: {totalStats.takerCount}单 ｜ 手续费: {totalStats.fees} USDT ｜ 盈亏: {totalStats.pnl} USDT ｜ 积分: {totalStats.volume} ｜ 积分率: {totalStats.pointsRate}
         </Text>
+        <Text color="magentaBright">團隊加成：{process.env.TEAM_BONUS_RATE}</Text>
+
       </Box>
 
       <Box flexDirection="column" marginBottom={1}>

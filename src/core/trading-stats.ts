@@ -2,7 +2,7 @@
 export interface TradingStats {
   // Maker 订单统计
   makerOrderCount: number;
-  // Taker 订单统计  
+  // Taker 订单统计
   takerOrderCount: number;
   // 手续费总计
   totalFees: number;
@@ -40,30 +40,48 @@ export function createEmptyStats(startTime: number = Date.now()): TradingStats {
   };
 }
 
-export function createEmptyHourlyStats(startTime: number = Date.now()): HourlyStats {
+export function createEmptyHourlyStats(
+  startTime: number = Date.now()
+): HourlyStats {
   return {
     ...createEmptyStats(startTime),
     hourStartTime: startTime,
   };
 }
 
-export function calculatePointsRate(fees: number, pnl: number, volume: number): number {
+// 获取团队加成比率的辅助函数
+function getTeamBonusRate(): number {
+  return parseFloat((globalThis as any).process?.env?.TEAM_BONUS_RATE || "1.1");
+}
+
+export function calculatePointsRate(
+  fees: number,
+  pnl: number,
+  volume: number
+): number {
   if (volume <= 0) return 0;
-  // 积分率 = (手续费 + 已实现盈亏的绝对损失) / 成交量 * 10000
-  // 如果盈亏为负(亏损)，则计入耗损；如果为正(盈利)，则不计入耗损
-  const loss = fees + (pnl < 0 ? Math.abs(pnl) : 0);
-  return (loss / volume) * 10000;
+
+  // 获取团队加成比率，默认为1.15
+  const teamBonus = getTeamBonusRate();
+
+  // 积分率 = (手续费 - 盈亏) / (成交量 / 2 * 团队加成) * 10000
+  // 分子：综合成本 = 手续费 - 盈亏（盈利时减少成本，亏损时增加成本）
+  // 分母：总交易量 / 2 * 团队加成
+  const numerator = fees - pnl; // 手续费(正) - 盈亏(盈利为正，亏损为负)
+  const denominator = (volume / 2) * teamBonus;
+
+  return (numerator / denominator) * 10000;
 }
 
 export interface TradeData {
   isMaker: boolean;
-  commission: number;  // 实际手续费金额
+  commission: number; // 实际手续费金额
   realizedPnl: number; // 已实现盈亏
-  volume: number;      // 成交金额
-  price: number;       // 成交价格
-  qty: number;         // 成交数量
-  tradeId?: number;    // 交易ID
-  timestamp: number;   // 交易时间
+  volume: number; // 成交金额
+  price: number; // 成交价格
+  qty: number; // 成交数量
+  tradeId?: number; // 交易ID
+  timestamp: number; // 交易时间
 }
 
 export function updateStatsWithRealTrade(
@@ -75,17 +93,21 @@ export function updateStatsWithRealTrade(
   } else {
     stats.takerOrderCount++;
   }
-  
+
   stats.totalFees += tradeData.commission;
   stats.totalPnl += tradeData.realizedPnl;
   stats.totalVolume += tradeData.volume;
-  stats.pointsRate = calculatePointsRate(stats.totalFees, stats.totalPnl, stats.totalVolume);
+  stats.pointsRate = calculatePointsRate(
+    stats.totalFees,
+    stats.totalPnl,
+    stats.totalVolume
+  );
 }
 
 export function shouldResetHourlyStats(hourlyStats: HourlyStats): boolean {
   const now = Date.now();
   const oneHour = 60 * 60 * 1000; // 1小时的毫秒数
-  return (now - hourlyStats.hourStartTime) >= oneHour;
+  return now - hourlyStats.hourStartTime >= oneHour;
 }
 
 export function resetHourlyStats(hourlyStats: HourlyStats): void {
@@ -107,12 +129,15 @@ export function formatStatsForDisplay(stats: TradingStats): {
   volume: string;
   pointsRate: string;
 } {
+  // 获取团队加成比率，默认为1.15
+  const teamBonus = getTeamBonusRate();
+
   return {
     makerCount: stats.makerOrderCount.toString(),
     takerCount: stats.takerOrderCount.toString(),
     fees: stats.totalFees.toFixed(4),
     pnl: stats.totalPnl.toFixed(4),
-    volume: (stats.totalVolume / 2).toFixed(2), // 几分 = 成交量/2
+    volume: ((stats.totalVolume / 2) * teamBonus).toFixed(2), // 积分 = 成交量/2 * 团队加成
     pointsRate: stats.pointsRate.toFixed(2),
   };
 }
