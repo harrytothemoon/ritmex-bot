@@ -19,6 +19,29 @@ import {
   unlockOperating,
 } from "./order-coordinator";
 import type { OrderLockMap, OrderPendingMap, OrderTimerMap } from "./order-coordinator";
+
+export interface MakerEngineSnapshot {
+  accountSnapshot: AsterAccountSnapshot | null;
+  depthSnapshot: AsterDepth | null;
+  tickerSnapshot: AsterTicker | null;
+  openOrders: AsterOrder[];
+  desiredOrders: DesiredOrder[];
+  sessionQuoteVolume: number;
+  accountUnrealized: number;
+  tradeLog: Array<{ type: string; timestamp: number; message: string }>;
+  lastUpdated: number;
+  ready: boolean;
+  symbol: string;
+  topBid: number | null;
+  topAsk: number | null;
+  spread: number;
+  position: { positionAmt: number; entryPrice: number; side: string };
+  pnl: number;
+  sessionVolume: number;
+  // 交易统计信息
+  tradingStats: TradingStatsSummary;
+}
+
 import { makeOrderPlan } from "./lib/order-plan";
 import { safeCancelOrder } from "./lib/orders";
 import { RateLimitController } from "./lib/rate-limit";
@@ -26,10 +49,12 @@ import {
   type TradingStatsSummary, 
   createEmptyStats, 
   createEmptyHourlyStats,
-  updateStatsWithTrade,
+  updateStatsWithRealTrade,
   shouldResetHourlyStats,
-  resetHourlyStats
+  resetHourlyStats,
+  type TradeData
 } from "./trading-stats";
+import type { TradeExecutionData } from "../exchanges/adapter";
 
 interface DesiredOrder {
   side: "BUY" | "SELL";
@@ -136,7 +161,48 @@ export class MakerEngine {
   }
 
   getSnapshot(): MakerEngineSnapshot {
-    return this.buildSnapshot();
+    // 检查并重置小时统计数据
+    if (shouldResetHourlyStats(this.tradingStats.hourly)) {
+      resetHourlyStats(this.tradingStats.hourly);
+    }
+
+    const { topBid, topAsk } = getTopPrices(this.depthSnapshot);
+    const ready = this.accountSnapshot !== null && this.depthSnapshot !== null && this.initialOrderSnapshotReady;
+    const position = getPosition(this.accountSnapshot, this.config.symbol);
+    const spread = topBid && topAsk ? topAsk - topBid : 0;
+    const pnl = computePositionPnl(position, this.tickerSnapshot);
+
+    return {
+      accountSnapshot: this.accountSnapshot,
+      depthSnapshot: this.depthSnapshot,
+      tickerSnapshot: this.tickerSnapshot,
+      openOrders: [...this.openOrders],
+      desiredOrders: [...this.desiredOrders],
+      sessionQuoteVolume: this.sessionQuoteVolume,
+      accountUnrealized: this.accountUnrealized,
+      tradeLog: this.tradeLog.all().map(entry => ({
+        type: entry.type,
+        timestamp: entry.eventTime || Date.now(),
+        message: entry.detail
+      })),
+      lastUpdated: Date.now(),
+      ready,
+      symbol: this.config.symbol,
+      topBid,
+      topAsk,
+      spread,
+      position: {
+        positionAmt: position.positionAmt,
+        entryPrice: position.entryPrice,
+        side: position.positionSide || "BOTH"
+      },
+      pnl,
+      sessionVolume: this.sessionQuoteVolume,
+      tradingStats: {
+        total: { ...this.tradingStats.total },
+        hourly: { ...this.tradingStats.hourly },
+      },
+    };
   }
 
   private bootstrap(): void {
@@ -180,6 +246,22 @@ export class MakerEngine {
       });
     } catch (err) {
       this.tradeLog.push("error", `订阅订单失败: ${String(err)}`);
+    }
+
+    // 监听真实交易数据
+    try {
+      this.exchange.watchTrades((tradeData) => {
+        try {
+          // 只处理当前交易对的交易
+          if (tradeData.symbol === this.config.symbol) {
+            this.handleRealTrade(tradeData);
+          }
+        } catch (err) {
+          this.tradeLog.push("error", `交易数据处理异常: ${String(err)}`);
+        }
+      });
+    } catch (err) {
+      this.tradeLog.push("error", `订阅交易数据失败: ${String(err)}`);
     }
 
     try {
@@ -549,34 +631,38 @@ export class MakerEngine {
     if (delta > 0) {
       const tradeVolume = delta * price;
       this.sessionQuoteVolume += tradeVolume;
-      
-      // 更新交易统计数据
-      this.updateTradingStats(tradeVolume, position);
+      // 注：交易统计现在通过真实交易数据更新，无需在此估算
     }
     this.prevPositionAmt = position.positionAmt;
   }
 
-  private updateTradingStats(tradeVolume: number, position: PositionSnapshot): void {
-    // 由于当前无法直接获取 maker/taker 和手续费信息，
-    // 我们先假设所有订单都是 maker 订单（符合做市策略的特点）
-    // 手续费估算：假设 maker 费率为 0.02%
-    const estimatedFee = tradeVolume * 0.0002; // 0.02% maker fee
-    const realizedPnl = 0; // 暂时无法计算准确的已实现盈亏
-    
-    // 假设为 maker 订单
-    const isMaker = true;
-    
+  private handleRealTrade(tradeData: TradeExecutionData): void {
+    // 转换为 TradeData 格式
+    const trade: TradeData = {
+      isMaker: tradeData.isMaker,
+      commission: Math.abs(tradeData.commission), // 手续费通常为负值，取绝对值
+      realizedPnl: tradeData.realizedPnl,
+      volume: tradeData.quoteQty, // 成交金额 (USDT)
+      price: tradeData.price,
+      qty: tradeData.qty,
+      tradeId: tradeData.tradeId,
+      timestamp: tradeData.timestamp,
+    };
+
     // 更新总统计
-    updateStatsWithTrade(this.tradingStats.total, isMaker, estimatedFee, realizedPnl, tradeVolume);
-    
+    updateStatsWithRealTrade(this.tradingStats.total, trade);
+
     // 更新小时统计
-    updateStatsWithTrade(this.tradingStats.hourly, isMaker, estimatedFee, realizedPnl, tradeVolume);
-    
+    updateStatsWithRealTrade(this.tradingStats.hourly, trade);
+
     // 记录交易日志
     this.tradeLog.push(
-      "trade", 
-      `交易成交: 成交量=${tradeVolume.toFixed(2)} USDT, 预估手续费=${estimatedFee.toFixed(4)} USDT`
+      "trade",
+      `真实交易: ${tradeData.isMaker ? 'Maker' : 'Taker'} | 价格=${trade.price.toFixed(4)} | 数量=${trade.qty.toFixed(4)} | 成交额=${trade.volume.toFixed(2)} USDT | 手续费=${trade.commission.toFixed(4)} USDT | 盈亏=${trade.realizedPnl.toFixed(4)} USDT`
     );
+
+    // 发出更新
+    this.emitUpdate();
   }
 
   private getReferencePrice(): number | null {

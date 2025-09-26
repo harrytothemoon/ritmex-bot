@@ -55,22 +55,30 @@ export function calculatePointsRate(fees: number, pnl: number, volume: number): 
   return (loss / volume) * 10000;
 }
 
-export function updateStatsWithTrade(
-  stats: TradingStats, 
-  isMaker: boolean, 
-  fee: number, 
-  realizedPnl: number, 
-  volume: number
+export interface TradeData {
+  isMaker: boolean;
+  commission: number;  // 实际手续费金额
+  realizedPnl: number; // 已实现盈亏
+  volume: number;      // 成交金额
+  price: number;       // 成交价格
+  qty: number;         // 成交数量
+  tradeId?: number;    // 交易ID
+  timestamp: number;   // 交易时间
+}
+
+export function updateStatsWithRealTrade(
+  stats: TradingStats,
+  tradeData: TradeData
 ): void {
-  if (isMaker) {
+  if (tradeData.isMaker) {
     stats.makerOrderCount++;
   } else {
     stats.takerOrderCount++;
   }
   
-  stats.totalFees += fee;
-  stats.totalPnl += realizedPnl;
-  stats.totalVolume += volume;
+  stats.totalFees += tradeData.commission;
+  stats.totalPnl += tradeData.realizedPnl;
+  stats.totalVolume += tradeData.volume;
   stats.pointsRate = calculatePointsRate(stats.totalFees, stats.totalPnl, stats.totalVolume);
 }
 

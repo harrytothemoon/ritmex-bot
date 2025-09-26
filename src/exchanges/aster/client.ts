@@ -10,6 +10,7 @@ import type {
   CreateOrderParams,
   PositionSide,
 } from "../types";
+import type { TradeExecutionData } from "../adapter";
 
 process.env.NODE_TLS_REJECT_UNAUTHORIZED = "0";
 
@@ -729,6 +730,7 @@ export class AsterGateway {
   private readonly depthEvents = new Map<string, SimpleEvent<AsterDepth>>();
   private readonly tickerEvents = new Map<string, SimpleEvent<AsterTicker>>();
   private readonly klineEvents = new Map<string, SimpleEvent<AsterKline[]>>();
+  private readonly tradeEvent = new SimpleEvent<TradeExecutionData>();
 
   private readonly klineStores = new Map<string, AsterKline[]>();
   private readonly klineRefreshTimers = new Map<string, ReturnType<typeof setInterval>>();
@@ -753,6 +755,27 @@ export class AsterGateway {
       this.ordersEvent.emit(Array.from(this.openOrders.values()));
       const execType = typeof event.payload?.x === "string" ? event.payload.x.toUpperCase() : "";
       const status = typeof event.payload?.X === "string" ? event.payload.X.toUpperCase() : "";
+      
+      // 检测交易执行，提取准确的交易数据
+      if (execType === "TRADE") {
+        const payload = event.payload;
+        const tradeData: TradeExecutionData = {
+          symbol: String(payload.s || ""),
+          orderId: Number(payload.i || 0),
+          tradeId: Number(payload.t || 0),
+          price: Number(payload.L || 0),           // 成交价格
+          qty: Number(payload.l || 0),             // 成交数量
+          quoteQty: Number(payload.L || 0) * Number(payload.l || 0), // 成交金额
+          commission: Number(payload.n || 0),      // 手续费金额
+          commissionAsset: String(payload.N || ""), // 手续费资产
+          isMaker: Boolean(payload.m),             // 是否为maker
+          realizedPnl: Number(payload.rp || 0),    // 已实现盈亏
+          side: String(payload.S || ""),           // 订单方向
+          timestamp: Number(payload.T || event.eventTime), // 交易时间
+        };
+        this.tradeEvent.emit(tradeData);
+      }
+      
       if (execType === "TRADE" || status === "FILLED" || status === "PARTIALLY_FILLED") {
         void this.refreshPositions();
       }
@@ -1007,5 +1030,55 @@ export class AsterGateway {
       }
     }
     this.ordersEvent.emit(Array.from(this.openOrders.values()));
+  }
+
+  onAccount(listener: (snapshot: AsterAccountSnapshot) => void): void {
+    this.accountEvent.add(listener);
+  }
+
+  onOrders(listener: (orders: AsterOrder[]) => void): void {
+    this.ordersEvent.add(listener);
+  }
+
+  onDepth(symbol: string, listener: (depth: AsterDepth) => void): void {
+    const upper = symbol.toUpperCase();
+    let event = this.depthEvents.get(upper);
+    if (!event) {
+      event = new SimpleEvent<AsterDepth>();
+      this.depthEvents.set(upper, event);
+      this.publicStreams.subscribeDepth(upper, (depth: AsterDepth) => {
+        event!.emit(depth);
+      });
+    }
+    event.add(listener);
+  }
+
+  onTicker(symbol: string, listener: (ticker: AsterTicker) => void): void {
+    const upper = symbol.toUpperCase();
+    let event = this.tickerEvents.get(upper);
+    if (!event) {
+      event = new SimpleEvent<AsterTicker>();
+      this.tickerEvents.set(upper, event);
+      this.publicStreams.subscribeTicker(upper, (ticker: AsterTicker) => {
+        event!.emit(ticker);
+      });
+    }
+    event.add(listener);
+  }
+
+  onKlines(symbol: string, interval: string, listener: (klines: AsterKline[]) => void): void {
+    const upper = symbol.toUpperCase();
+    const key = `${upper}:${interval}`;
+    let event = this.klineEvents.get(key);
+    if (!event) {
+      event = new SimpleEvent<AsterKline[]>();
+      this.klineEvents.set(key, event);
+      this.subscribeKlines(upper, interval);
+    }
+    event.add(listener);
+  }
+
+  onTrades(listener: (trade: TradeExecutionData) => void): void {
+    this.tradeEvent.add(listener);
   }
 }

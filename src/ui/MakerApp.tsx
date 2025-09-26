@@ -163,10 +163,10 @@ export function MakerApp({ onExit }: MakerAppProps) {
       <Box flexDirection="column" marginBottom={1}>
         <Text color="magentaBright">交易统计</Text>
         <Text>
-          【近一小时】Maker: {hourlyStats.makerCount}单 ｜ Taker: {hourlyStats.takerCount}单 ｜ 手续费: {hourlyStats.fees} USDT ｜ 盈亏: {hourlyStats.pnl} USDT ｜ 几分: {hourlyStats.volume} ｜ 积分率: {hourlyStats.pointsRate}‱
+          【近一小时】Maker: {hourlyStats.makerCount}单 ｜ Taker: {hourlyStats.takerCount}单 ｜ 手续费: {hourlyStats.fees} USDT ｜ 盈亏: {hourlyStats.pnl} USDT ｜ 积分: {hourlyStats.volume} ｜ 积分率: {hourlyStats.pointsRate}
         </Text>
         <Text>
-          【总累计】Maker: {totalStats.makerCount}单 ｜ Taker: {totalStats.takerCount}单 ｜ 手续费: {totalStats.fees} USDT ｜ 盈亏: {totalStats.pnl} USDT ｜ 几分: {totalStats.volume} ｜ 积分率: {totalStats.pointsRate}‱
+          【总累计】Maker: {totalStats.makerCount}单 ｜ Taker: {totalStats.takerCount}单 ｜ 手续费: {totalStats.fees} USDT ｜ 盈亏: {totalStats.pnl} USDT ｜ 积分: {totalStats.volume} ｜ 积分率: {totalStats.pointsRate}
         </Text>
       </Box>
 

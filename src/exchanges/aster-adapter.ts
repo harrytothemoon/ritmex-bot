@@ -5,6 +5,7 @@ import type {
   KlineListener,
   OrderListener,
   TickerListener,
+  TradeListener,
 } from "./adapter";
 import type { AsterOrder, CreateOrderParams, AsterDepth, AsterTicker, AsterKline } from "./types";
 import { extractMessage } from "../utils/errors";
@@ -123,6 +124,13 @@ export class AsterExchangeAdapter implements ExchangeAdapter {
     this.gateway.onKlines(symbol, interval, this.safeInvoke("watchKlines", (klines: AsterKline[]) => {
       cb(klines);
     }));
+  }
+
+  watchTrades(cb: TradeListener): void {
+    void this.ensureInitialized();
+    this.gateway.onTrades((trade) => {
+      cb(trade);
+    });
   }
 
   async createOrder(params: CreateOrderParams): Promise<AsterOrder> {
