@@ -5,6 +5,7 @@ import { AsterExchangeAdapter } from "../exchanges/aster-adapter";
 import { MakerEngine, type MakerEngineSnapshot } from "../core/maker-engine";
 import { DataTable, type TableColumn } from "./components/DataTable";
 import { formatNumber } from "../utils/format";
+import { formatStatsForDisplay } from "../core/trading-stats";
 
 interface MakerAppProps {
   onExit: () => void;
@@ -115,6 +116,10 @@ export function MakerApp({ onExit }: MakerAppProps) {
   ];
 
   const lastLogs = snapshot.tradeLog.slice(-5);
+  
+  // 格式化统计数据
+  const totalStats = formatStatsForDisplay(snapshot.tradingStats.total);
+  const hourlyStats = formatStatsForDisplay(snapshot.tradingStats.hourly);
 
   return (
     <Box flexDirection="column" paddingX={1}>
@@ -153,6 +158,16 @@ export function MakerApp({ onExit }: MakerAppProps) {
             累计成交量: {formatNumber(snapshot.sessionVolume, 2)} USDT
           </Text>
         </Box>
+      </Box>
+
+      <Box flexDirection="column" marginBottom={1}>
+        <Text color="magentaBright">交易统计</Text>
+        <Text>
+          【近一小时】Maker: {hourlyStats.makerCount}单 ｜ Taker: {hourlyStats.takerCount}单 ｜ 手续费: {hourlyStats.fees} USDT ｜ 盈亏: {hourlyStats.pnl} USDT ｜ 几分: {hourlyStats.volume} ｜ 积分率: {hourlyStats.pointsRate}‱
+        </Text>
+        <Text>
+          【总累计】Maker: {totalStats.makerCount}单 ｜ Taker: {totalStats.takerCount}单 ｜ 手续费: {totalStats.fees} USDT ｜ 盈亏: {totalStats.pnl} USDT ｜ 几分: {totalStats.volume} ｜ 积分率: {totalStats.pointsRate}‱
+        </Text>
       </Box>
 
       <Box flexDirection="column" marginBottom={1}>

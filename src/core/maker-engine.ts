@@ -22,6 +22,14 @@ import type { OrderLockMap, OrderPendingMap, OrderTimerMap } from "./order-coord
 import { makeOrderPlan } from "./lib/order-plan";
 import { safeCancelOrder } from "./lib/orders";
 import { RateLimitController } from "./lib/rate-limit";
+import { 
+  type TradingStatsSummary, 
+  createEmptyStats, 
+  createEmptyHourlyStats,
+  updateStatsWithTrade,
+  shouldResetHourlyStats,
+  resetHourlyStats
+} from "./trading-stats";
 
 interface DesiredOrder {
   side: "BUY" | "SELL";
@@ -44,6 +52,8 @@ export interface MakerEngineSnapshot {
   desiredOrders: DesiredOrder[];
   tradeLog: TradeLogEntry[];
   lastUpdated: number | null;
+  // 交易统计信息
+  tradingStats: TradingStatsSummary;
 }
 
 type MakerEvent = "update";
@@ -77,11 +87,22 @@ export class MakerEngine {
   private entryPricePendingLogged = false;
   private readonly rateLimit: RateLimitController;
 
+  // 交易统计数据
+  private tradingStats: TradingStatsSummary;
+
   constructor(private readonly config: MakerConfig, private readonly exchange: ExchangeAdapter) {
     this.tradeLog = createTradeLog(this.config.maxLogEntries);
     this.rateLimit = new RateLimitController(this.config.refreshIntervalMs, (type, detail) =>
       this.tradeLog.push(type, detail)
     );
+    
+    // 初始化交易统计数据
+    const now = Date.now();
+    this.tradingStats = {
+      total: createEmptyStats(now),
+      hourly: createEmptyHourlyStats(now),
+    };
+    
     this.bootstrap();
   }
 
@@ -487,6 +508,11 @@ export class MakerEngine {
     const spread = topBid != null && topAsk != null ? topAsk - topBid : null;
     const pnl = computePositionPnl(position, topBid, topAsk);
 
+    // 检查是否需要重置小时统计
+    if (shouldResetHourlyStats(this.tradingStats.hourly)) {
+      resetHourlyStats(this.tradingStats.hourly);
+    }
+
     return {
       ready: this.isReady(),
       symbol: this.config.symbol,
@@ -501,6 +527,10 @@ export class MakerEngine {
       desiredOrders: this.desiredOrders,
       tradeLog: this.tradeLog.all(),
       lastUpdated: Date.now(),
+      tradingStats: {
+        total: { ...this.tradingStats.total },
+        hourly: { ...this.tradingStats.hourly },
+      },
     };
   }
 
@@ -517,9 +547,36 @@ export class MakerEngine {
     }
     const delta = Math.abs(position.positionAmt - this.prevPositionAmt);
     if (delta > 0) {
-      this.sessionQuoteVolume += delta * price;
+      const tradeVolume = delta * price;
+      this.sessionQuoteVolume += tradeVolume;
+      
+      // 更新交易统计数据
+      this.updateTradingStats(tradeVolume, position);
     }
     this.prevPositionAmt = position.positionAmt;
+  }
+
+  private updateTradingStats(tradeVolume: number, position: PositionSnapshot): void {
+    // 由于当前无法直接获取 maker/taker 和手续费信息，
+    // 我们先假设所有订单都是 maker 订单（符合做市策略的特点）
+    // 手续费估算：假设 maker 费率为 0.02%
+    const estimatedFee = tradeVolume * 0.0002; // 0.02% maker fee
+    const realizedPnl = 0; // 暂时无法计算准确的已实现盈亏
+    
+    // 假设为 maker 订单
+    const isMaker = true;
+    
+    // 更新总统计
+    updateStatsWithTrade(this.tradingStats.total, isMaker, estimatedFee, realizedPnl, tradeVolume);
+    
+    // 更新小时统计
+    updateStatsWithTrade(this.tradingStats.hourly, isMaker, estimatedFee, realizedPnl, tradeVolume);
+    
+    // 记录交易日志
+    this.tradeLog.push(
+      "trade", 
+      `交易成交: 成交量=${tradeVolume.toFixed(2)} USDT, 预估手续费=${estimatedFee.toFixed(4)} USDT`
+    );
   }
 
   private getReferencePrice(): number | null {

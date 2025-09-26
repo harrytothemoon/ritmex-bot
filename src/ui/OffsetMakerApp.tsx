@@ -5,6 +5,7 @@ import { AsterExchangeAdapter } from "../exchanges/aster-adapter";
 import { OffsetMakerEngine, type OffsetMakerEngineSnapshot } from "../core/offset-maker-engine";
 import { DataTable, type TableColumn } from "./components/DataTable";
 import { formatNumber } from "../utils/format";
+import { formatStatsForDisplay } from "../core/trading-stats";
 
 interface OffsetMakerAppProps {
   onExit: () => void;
@@ -123,6 +124,10 @@ export function OffsetMakerApp({ onExit }: OffsetMakerAppProps) {
     ? "买盘占优"
     : "卖盘占优";
 
+  // 格式化统计数据
+  const totalStats = formatStatsForDisplay(snapshot.tradingStats.total);
+  const hourlyStats = formatStatsForDisplay(snapshot.tradingStats.hourly);
+
   return (
     <Box flexDirection="column" paddingX={1}>
       <Box flexDirection="column" marginBottom={1}>
@@ -166,6 +171,16 @@ export function OffsetMakerApp({ onExit }: OffsetMakerAppProps) {
             累计成交量: {formatNumber(snapshot.sessionVolume, 2)} USDT
           </Text>
         </Box>
+      </Box>
+
+      <Box flexDirection="column" marginBottom={1}>
+        <Text color="magentaBright">交易统计</Text>
+        <Text>
+          【近一小时】Maker: {hourlyStats.makerCount}单 ｜ Taker: {hourlyStats.takerCount}单 ｜ 手续费: {hourlyStats.fees} USDT ｜ 盈亏: {hourlyStats.pnl} USDT ｜ 几分: {hourlyStats.volume} ｜ 积分率: {hourlyStats.pointsRate}‱
+        </Text>
+        <Text>
+          【总累计】Maker: {totalStats.makerCount}单 ｜ Taker: {totalStats.takerCount}单 ｜ 手续费: {totalStats.fees} USDT ｜ 盈亏: {totalStats.pnl} USDT ｜ 几分: {totalStats.volume} ｜ 积分率: {totalStats.pointsRate}‱
+        </Text>
       </Box>
 
       <Box flexDirection="column" marginBottom={1}>
