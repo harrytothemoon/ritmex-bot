@@ -110,8 +110,13 @@ export function shouldResetHourlyStats(hourlyStats: HourlyStats): boolean {
   return now - hourlyStats.hourStartTime >= oneHour;
 }
 
-export function resetHourlyStats(hourlyStats: HourlyStats): void {
+export async function resetHourlyStats(hourlyStats: HourlyStats): Promise<void> {
   const now = Date.now();
+  
+  // 保存舊的統計數據
+  const statsToLog = { ...hourlyStats };
+  
+  // 重置統計數據
   hourlyStats.makerOrderCount = 0;
   hourlyStats.takerOrderCount = 0;
   hourlyStats.totalFees = 0;
@@ -119,6 +124,12 @@ export function resetHourlyStats(hourlyStats: HourlyStats): void {
   hourlyStats.totalVolume = 0;
   hourlyStats.pointsRate = 0;
   hourlyStats.hourStartTime = now;
+  
+  // 非同步寫入CSV，不影響主要邏輯流程
+  const { tradingStatsLogger } = await import('../utils/csv-logger');
+  void tradingStatsLogger.logHourlyStats(statsToLog).catch(err => {
+    console.error('寫入統計數據到CSV時發生錯誤:', err);
+  });
 }
 
 export function formatStatsForDisplay(stats: TradingStats): {
