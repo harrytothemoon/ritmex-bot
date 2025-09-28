@@ -110,12 +110,16 @@ export function shouldResetHourlyStats(hourlyStats: HourlyStats): boolean {
   return now - hourlyStats.hourStartTime >= oneHour;
 }
 
-export async function resetHourlyStats(hourlyStats: HourlyStats): Promise<void> {
+export async function resetHourlyStats(
+  hourlyStats: HourlyStats,
+  totalStats?: TradingStats,
+  symbol?: string
+): Promise<void> {
   const now = Date.now();
-  
+
   // 保存舊的統計數據
   const statsToLog = { ...hourlyStats };
-  
+
   // 重置統計數據
   hourlyStats.makerOrderCount = 0;
   hourlyStats.takerOrderCount = 0;
@@ -124,12 +128,33 @@ export async function resetHourlyStats(hourlyStats: HourlyStats): Promise<void> 
   hourlyStats.totalVolume = 0;
   hourlyStats.pointsRate = 0;
   hourlyStats.hourStartTime = now;
-  
-  // 非同步寫入CSV，不影響主要邏輯流程
-  const { tradingStatsLogger } = await import('../utils/csv-logger');
-  void tradingStatsLogger.logHourlyStats(statsToLog).catch(err => {
-    console.error('寫入統計數據到CSV時發生錯誤:', err);
-  });
+
+  // 并行执行CSV记录和Telegram通知，不影响主要逻辑流程
+  const promises = [
+    // CSV记录
+    import("../utils/csv-logger")
+      .then(({ tradingStatsLogger }) =>
+        tradingStatsLogger.logHourlyStats(statsToLog)
+      )
+      .catch((err) => {
+        console.error("寫入統計數據到CSV時發生錯誤:", err);
+      }),
+
+    // Telegram通知 (如果提供了总统计数据)
+    totalStats
+      ? import("../utils/telegram-notifier")
+          .then(({ getTelegramNotifier }) => {
+            const notifier = getTelegramNotifier();
+            return notifier?.sendTradingStats(statsToLog, totalStats, symbol);
+          })
+          .catch((err) => {
+            console.error("發送Telegram通知時發生錯誤:", err);
+          })
+      : Promise.resolve(),
+  ];
+
+  // 不等待完成，避免阻塞主线程
+  void Promise.all(promises);
 }
 
 export function formatStatsForDisplay(stats: TradingStats): {

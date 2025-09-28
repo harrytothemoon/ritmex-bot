@@ -14,24 +14,24 @@ import { computeDepthStats } from "../utils/depth";
 import { computePositionPnl } from "../utils/pnl";
 import { getTopPrices, getMidOrLast } from "../utils/price";
 import { shouldStopLoss } from "../utils/risk";
-import {
-  marketClose,
-  placeOrder,
-  unlockOperating,
+import { marketClose, placeOrder, unlockOperating } from "./order-coordinator";
+import type {
+  OrderLockMap,
+  OrderPendingMap,
+  OrderTimerMap,
 } from "./order-coordinator";
-import type { OrderLockMap, OrderPendingMap, OrderTimerMap } from "./order-coordinator";
 import type { MakerEngineSnapshot } from "./maker-engine";
 import { makeOrderPlan } from "./lib/order-plan";
 import { safeCancelOrder } from "./lib/orders";
 import { RateLimitController } from "./lib/rate-limit";
-import { 
-  type TradingStatsSummary, 
-  createEmptyStats, 
+import {
+  type TradingStatsSummary,
+  createEmptyStats,
   createEmptyHourlyStats,
   updateStatsWithRealTrade,
   shouldResetHourlyStats,
   resetHourlyStats,
-  type TradeData
+  type TradeData,
 } from "./trading-stats";
 import type { TradeExecutionData } from "../exchanges/adapter";
 
@@ -87,38 +87,52 @@ export class OffsetMakerEngine {
   private lastSellDepthSum10 = 0;
   private lastSkipBuy = false;
   private lastSkipSell = false;
-  private lastImbalance: "balanced" | "buy_dominant" | "sell_dominant" = "balanced";
+  private lastImbalance: "balanced" | "buy_dominant" | "sell_dominant" =
+    "balanced";
 
   // 交易统计数据
   private tradingStats: TradingStatsSummary;
+  private startTime: number = 0;
 
-  constructor(private readonly config: MakerConfig, private readonly exchange: ExchangeAdapter) {
+  constructor(
+    private readonly config: MakerConfig,
+    private readonly exchange: ExchangeAdapter
+  ) {
     this.tradeLog = createTradeLog(this.config.maxLogEntries);
-    this.rateLimit = new RateLimitController(this.config.refreshIntervalMs, (type, detail) =>
-      this.tradeLog.push(type, detail)
+    this.rateLimit = new RateLimitController(
+      this.config.refreshIntervalMs,
+      (type, detail) => this.tradeLog.push(type, detail)
     );
-    
+
     // 初始化交易统计数据
     const now = Date.now();
     this.tradingStats = {
       total: createEmptyStats(now),
       hourly: createEmptyHourlyStats(now),
     };
-    
+
     this.bootstrap();
   }
 
   start(): void {
     if (this.timer) return;
+
+    this.startTime = Date.now();
     this.timer = setInterval(() => {
       void this.tick();
     }, this.config.refreshIntervalMs);
+
+    // 发送启动通知
+    void this.sendStartNotification();
   }
 
   stop(): void {
     if (this.timer) {
       clearInterval(this.timer);
       this.timer = null;
+
+      // 发送停止通知
+      void this.sendStopNotification();
     }
   }
 
@@ -139,56 +153,6 @@ export class OffsetMakerEngine {
 
   getSnapshot(): OffsetMakerEngineSnapshot {
     return this.buildSnapshot();
-  }
-
-  private buildSnapshot(): OffsetMakerEngineSnapshot {
-    // 检查并重置小时统计数据
-    if (shouldResetHourlyStats(this.tradingStats.hourly)) {
-      resetHourlyStats(this.tradingStats.hourly);
-    }
-
-    const { topBid, topAsk } = getTopPrices(this.depthSnapshot);
-    const ready = this.accountSnapshot !== null && this.depthSnapshot !== null && this.initialOrderSnapshotReady;
-    const position = getPosition(this.accountSnapshot, this.config.symbol);
-    const spread = topBid && topAsk ? topAsk - topBid : 0;
-    const pnl = computePositionPnl(position, this.tickerSnapshot);
-
-    return {
-      accountSnapshot: this.accountSnapshot,
-      depthSnapshot: this.depthSnapshot,
-      tickerSnapshot: this.tickerSnapshot,
-      openOrders: [...this.openOrders],
-      desiredOrders: [...this.desiredOrders],
-      sessionQuoteVolume: this.sessionQuoteVolume,
-      accountUnrealized: this.accountUnrealized,
-      tradeLog: this.tradeLog.all().map(entry => ({
-        type: entry.type,
-        timestamp: entry.eventTime || Date.now(),
-        message: entry.detail
-      })),
-      lastUpdated: Date.now(),
-      ready,
-      symbol: this.config.symbol,
-      topBid,
-      topAsk,
-      spread,
-      position: {
-        positionAmt: position.positionAmt,
-        entryPrice: position.entryPrice,
-        side: position.positionSide || "BOTH"
-      },
-      pnl,
-      sessionVolume: this.sessionQuoteVolume,
-      buyDepthSum10: this.lastBuyDepthSum10,
-      sellDepthSum10: this.lastSellDepthSum10,
-      depthImbalance: this.lastImbalance,
-      skipBuySide: this.lastSkipBuy,
-      skipSellSide: this.lastSkipSell,
-      tradingStats: {
-        total: { ...this.tradingStats.total },
-        hourly: { ...this.tradingStats.hourly },
-      },
-    };
   }
 
   private bootstrap(): void {
@@ -216,9 +180,14 @@ export class OffsetMakerEngine {
         try {
           this.syncLocksWithOrders(orders);
           this.openOrders = Array.isArray(orders)
-            ? orders.filter((order) => order.type !== "MARKET" && order.symbol === this.config.symbol)
+            ? orders.filter(
+                (order) =>
+                  order.type !== "MARKET" && order.symbol === this.config.symbol
+              )
             : [];
-          const currentIds = new Set(this.openOrders.map((order) => order.orderId));
+          const currentIds = new Set(
+            this.openOrders.map((order) => order.orderId)
+          );
           for (const id of Array.from(this.pendingCancelOrders)) {
             if (!currentIds.has(id)) {
               this.pendingCancelOrders.delete(id);
@@ -295,7 +264,12 @@ export class OffsetMakerEngine {
       const pendingId = this.pending[type];
       if (!pendingId) return;
       const match = list.find((order) => String(order.orderId) === pendingId);
-      if (!match || (match.status && match.status !== "NEW" && match.status !== "PARTIALLY_FILLED")) {
+      if (
+        !match ||
+        (match.status &&
+          match.status !== "NEW" &&
+          match.status !== "PARTIALLY_FILLED")
+      ) {
         unlockOperating(this.locks, this.timers, this.pending, type);
       }
     });
@@ -334,7 +308,8 @@ export class OffsetMakerEngine {
         return;
       }
 
-      const { buySum, sellSum, skipBuySide, skipSellSide, imbalance } = this.evaluateDepth(depth);
+      const { buySum, sellSum, skipBuySide, skipSellSide, imbalance } =
+        this.evaluateDepth(depth);
       this.lastBuyDepthSum10 = buySum;
       this.lastSellDepthSum10 = sellSum;
       this.lastSkipBuy = skipBuySide;
@@ -342,14 +317,24 @@ export class OffsetMakerEngine {
       this.lastImbalance = imbalance;
 
       const position = getPosition(this.accountSnapshot, this.config.symbol);
-      const handledImbalance = await this.handleImbalanceExit(position, buySum, sellSum);
+      const handledImbalance = await this.handleImbalanceExit(
+        position,
+        buySum,
+        sellSum
+      );
       if (handledImbalance) {
         this.emitUpdate();
         return;
       }
 
-      const bidPrice = roundDownToTick(topBid! - this.config.bidOffset, this.config.priceTick);
-      const askPrice = roundDownToTick(topAsk! + this.config.askOffset, this.config.priceTick);
+      const bidPrice = roundDownToTick(
+        topBid! - this.config.bidOffset,
+        this.config.priceTick
+      );
+      const askPrice = roundDownToTick(
+        topAsk! + this.config.askOffset,
+        this.config.priceTick
+      );
       const absPosition = Math.abs(position.positionAmt);
       const desired: DesiredOrder[] = [];
       const canEnter = !this.rateLimit.shouldBlockEntries();
@@ -357,15 +342,31 @@ export class OffsetMakerEngine {
       if (absPosition < EPS) {
         this.entryPricePendingLogged = false;
         if (!skipBuySide && canEnter) {
-          desired.push({ side: "BUY", price: bidPrice, amount: this.config.tradeAmount, reduceOnly: false });
+          desired.push({
+            side: "BUY",
+            price: bidPrice,
+            amount: this.config.tradeAmount,
+            reduceOnly: false,
+          });
         }
         if (!skipSellSide && canEnter) {
-          desired.push({ side: "SELL", price: askPrice, amount: this.config.tradeAmount, reduceOnly: false });
+          desired.push({
+            side: "SELL",
+            price: askPrice,
+            amount: this.config.tradeAmount,
+            reduceOnly: false,
+          });
         }
       } else {
-        const closeSide: "BUY" | "SELL" = position.positionAmt > 0 ? "SELL" : "BUY";
+        const closeSide: "BUY" | "SELL" =
+          position.positionAmt > 0 ? "SELL" : "BUY";
         const closePrice = closeSide === "SELL" ? askPrice : bidPrice;
-        desired.push({ side: closeSide, price: closePrice, amount: absPosition, reduceOnly: true });
+        desired.push({
+          side: closeSide,
+          price: closePrice,
+          amount: absPosition,
+          reduceOnly: true,
+        });
       }
 
       this.desiredOrders = desired;
@@ -408,7 +409,12 @@ export class OffsetMakerEngine {
         (type, detail) => this.tradeLog.push(type, detail),
         {
           markPrice: position.markPrice,
-          expectedPrice: Number(side === "SELL" ? this.depthSnapshot?.bids?.[0]?.[0] : this.depthSnapshot?.asks?.[0]?.[0]) || null,
+          expectedPrice:
+            Number(
+              side === "SELL"
+                ? this.depthSnapshot?.bids?.[0]?.[0]
+                : this.depthSnapshot?.asks?.[0]?.[0]
+            ) || null,
           maxPct: this.config.maxCloseSlippagePct,
         }
       );
@@ -469,8 +475,10 @@ export class OffsetMakerEngine {
     const absPosition = Math.abs(position.positionAmt);
     if (absPosition < EPS) return false;
 
-    const longExitRequired = position.positionAmt > 0 && (buySum === 0 || buySum * 6 < sellSum);
-    const shortExitRequired = position.positionAmt < 0 && (sellSum === 0 || sellSum * 6 < buySum);
+    const longExitRequired =
+      position.positionAmt > 0 && (buySum === 0 || buySum * 6 < sellSum);
+    const shortExitRequired =
+      position.positionAmt < 0 && (sellSum === 0 || sellSum * 6 < buySum);
 
     if (!longExitRequired && !shortExitRequired) return false;
 
@@ -480,7 +488,9 @@ export class OffsetMakerEngine {
     const closeSidePrice = side === "SELL" ? bid : ask;
     this.tradeLog.push(
       "stop",
-      `深度极端不平衡(${buySum.toFixed(4)} vs ${sellSum.toFixed(4)}), 市价平仓 ${side}`
+      `深度极端不平衡(${buySum.toFixed(4)} vs ${sellSum.toFixed(
+        4
+      )}), 市价平仓 ${side}`
     );
     try {
       await this.flushOrders();
@@ -512,8 +522,14 @@ export class OffsetMakerEngine {
 
   private async syncOrders(targets: DesiredOrder[]): Promise<void> {
     const tolerance = this.config.priceChaseThreshold;
-    const availableOrders = this.openOrders.filter((o) => !this.pendingCancelOrders.has(o.orderId));
-    const { toCancel, toPlace } = makeOrderPlan(availableOrders, targets, tolerance);
+    const availableOrders = this.openOrders.filter(
+      (o) => !this.pendingCancelOrders.has(o.orderId)
+    );
+    const { toCancel, toPlace } = makeOrderPlan(
+      availableOrders,
+      targets,
+      tolerance
+    );
 
     for (const order of toCancel) {
       if (this.pendingCancelOrders.has(order.orderId)) continue;
@@ -532,13 +548,17 @@ export class OffsetMakerEngine {
         () => {
           this.tradeLog.push("order", "撤销时发现订单已被成交/取消，忽略");
           this.pendingCancelOrders.delete(order.orderId);
-          this.openOrders = this.openOrders.filter((existing) => existing.orderId !== order.orderId);
+          this.openOrders = this.openOrders.filter(
+            (existing) => existing.orderId !== order.orderId
+          );
         },
         (error) => {
           this.tradeLog.push("error", `撤销订单失败: ${String(error)}`);
           this.pendingCancelOrders.delete(order.orderId);
           // 避免同一轮内重复操作同一张已出错的本地挂单，直接从本地缓存移除，等待下一次订单推送重建
-          this.openOrders = this.openOrders.filter((existing) => existing.orderId !== order.orderId);
+          this.openOrders = this.openOrders.filter(
+            (existing) => existing.orderId !== order.orderId
+          );
         }
       );
     }
@@ -560,24 +580,37 @@ export class OffsetMakerEngine {
           (type, detail) => this.tradeLog.push(type, detail),
           target.reduceOnly,
           {
-            markPrice: getPosition(this.accountSnapshot, this.config.symbol).markPrice,
+            markPrice: getPosition(this.accountSnapshot, this.config.symbol)
+              .markPrice,
             maxPct: this.config.maxCloseSlippagePct,
           }
         );
       } catch (error) {
-        this.tradeLog.push("error", `挂单失败(${target.side} ${target.price}): ${String(error)}`);
+        this.tradeLog.push(
+          "error",
+          `挂单失败(${target.side} ${target.price}): ${String(error)}`
+        );
       }
     }
   }
 
-  private async checkRisk(position: PositionSnapshot, bidPrice: number, askPrice: number): Promise<void> {
+  private async checkRisk(
+    position: PositionSnapshot,
+    bidPrice: number,
+    askPrice: number
+  ): Promise<void> {
     const absPosition = Math.abs(position.positionAmt);
     if (absPosition < EPS) return;
 
-    const hasEntryPrice = Number.isFinite(position.entryPrice) && Math.abs(position.entryPrice) > 1e-8;
+    const hasEntryPrice =
+      Number.isFinite(position.entryPrice) &&
+      Math.abs(position.entryPrice) > 1e-8;
     if (!hasEntryPrice) {
       if (!this.entryPricePendingLogged) {
-        this.tradeLog.push("info", "做市持仓均价未同步，等待账户快照刷新后再执行止损判断");
+        this.tradeLog.push(
+          "info",
+          "做市持仓均价未同步，等待账户快照刷新后再执行止损判断"
+        );
         this.entryPricePendingLogged = true;
       }
       return;
@@ -585,12 +618,19 @@ export class OffsetMakerEngine {
     this.entryPricePendingLogged = false;
 
     const pnl = computePositionPnl(position, bidPrice, askPrice);
-    const triggerStop = shouldStopLoss(position, bidPrice, askPrice, this.config.lossLimit);
+    const triggerStop = shouldStopLoss(
+      position,
+      bidPrice,
+      askPrice,
+      this.config.lossLimit
+    );
 
     if (triggerStop) {
       this.tradeLog.push(
         "stop",
-        `触发止损，方向=${position.positionAmt > 0 ? "多" : "空"} 当前亏损=${pnl.toFixed(4)} USDT`
+        `触发止损，方向=${
+          position.positionAmt > 0 ? "多" : "空"
+        } 当前亏损=${pnl.toFixed(4)} USDT`
       );
       try {
         await this.flushOrders();
@@ -606,7 +646,8 @@ export class OffsetMakerEngine {
           (type, detail) => this.tradeLog.push(type, detail),
           {
             markPrice: position.markPrice,
-            expectedPrice: Number(position.positionAmt > 0 ? bidPrice : askPrice) || null,
+            expectedPrice:
+              Number(position.positionAmt > 0 ? bidPrice : askPrice) || null,
             maxPct: this.config.maxCloseSlippagePct,
           }
         );
@@ -635,13 +676,17 @@ export class OffsetMakerEngine {
         () => {
           this.tradeLog.push("order", "订单已不存在，撤销跳过");
           this.pendingCancelOrders.delete(order.orderId);
-          this.openOrders = this.openOrders.filter((existing) => existing.orderId !== order.orderId);
+          this.openOrders = this.openOrders.filter(
+            (existing) => existing.orderId !== order.orderId
+          );
         },
         (error) => {
           this.tradeLog.push("error", `撤销订单失败: ${String(error)}`);
           this.pendingCancelOrders.delete(order.orderId);
           // 与同步撤单路径保持一致，移除本地异常订单，等待订单流重建
-          this.openOrders = this.openOrders.filter((existing) => existing.orderId !== order.orderId);
+          this.openOrders = this.openOrders.filter(
+            (existing) => existing.orderId !== order.orderId
+          );
         }
       );
     }
@@ -673,7 +718,11 @@ export class OffsetMakerEngine {
 
     // 检查是否需要重置小时统计
     if (shouldResetHourlyStats(this.tradingStats.hourly)) {
-      resetHourlyStats(this.tradingStats.hourly);
+      resetHourlyStats(
+        this.tradingStats.hourly,
+        this.tradingStats.total,
+        this.config.symbol
+      );
     }
 
     return {
@@ -744,7 +793,15 @@ export class OffsetMakerEngine {
     // 记录交易日志
     this.tradeLog.push(
       "trade",
-      `真实交易: ${tradeData.isMaker ? 'Maker' : 'Taker'} | 价格=${trade.price.toFixed(4)} | 数量=${trade.qty.toFixed(4)} | 成交额=${trade.volume.toFixed(2)} USDT | 手续费=${trade.commission.toFixed(4)} USDT | 盈亏=${trade.realizedPnl.toFixed(4)} USDT`
+      `真实交易: ${
+        tradeData.isMaker ? "Maker" : "Taker"
+      } | 价格=${trade.price.toFixed(4)} | 数量=${trade.qty.toFixed(
+        4
+      )} | 成交额=${trade.volume.toFixed(
+        2
+      )} USDT | 手续费=${trade.commission.toFixed(
+        4
+      )} USDT | 盈亏=${trade.realizedPnl.toFixed(4)} USDT`
     );
 
     // 发出更新
@@ -753,5 +810,51 @@ export class OffsetMakerEngine {
 
   private getReferencePrice(): number | null {
     return getMidOrLast(this.depthSnapshot, this.tickerSnapshot);
+  }
+
+  private async sendStartNotification(): Promise<void> {
+    try {
+      const { getTelegramNotifier } = await import(
+        "../utils/telegram-notifier"
+      );
+      const notifier = getTelegramNotifier();
+      if (notifier) {
+        await notifier.sendStartNotification(
+          this.config.symbol,
+          "偏移Maker策略"
+        );
+      }
+    } catch (error) {
+      console.error("发送启动通知失败:", error);
+    }
+  }
+
+  private async sendStopNotification(): Promise<void> {
+    try {
+      const { getTelegramNotifier } = await import(
+        "../utils/telegram-notifier"
+      );
+      const notifier = getTelegramNotifier();
+      if (notifier && this.startTime > 0) {
+        const runtime = Date.now() - this.startTime;
+        const totalTrades =
+          this.tradingStats.total.makerOrderCount +
+          this.tradingStats.total.takerOrderCount;
+
+        await notifier.sendStopNotification(
+          this.config.symbol,
+          "偏移Maker策略",
+          {
+            runtime,
+            totalTrades,
+            totalFees: this.tradingStats.total.totalFees,
+            totalPnl: this.tradingStats.total.totalPnl,
+            totalVolume: this.tradingStats.total.totalVolume,
+          }
+        );
+      }
+    } catch (error) {
+      console.error("发送停止通知失败:", error);
+    }
   }
 }

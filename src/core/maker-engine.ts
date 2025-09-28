@@ -13,12 +13,12 @@ import { getPosition, type PositionSnapshot } from "../utils/strategy";
 import { computePositionPnl } from "../utils/pnl";
 import { getTopPrices, getMidOrLast } from "../utils/price";
 import { shouldStopLoss } from "../utils/risk";
-import {
-  marketClose,
-  placeOrder,
-  unlockOperating,
+import { marketClose, placeOrder, unlockOperating } from "./order-coordinator";
+import type {
+  OrderLockMap,
+  OrderPendingMap,
+  OrderTimerMap,
 } from "./order-coordinator";
-import type { OrderLockMap, OrderPendingMap, OrderTimerMap } from "./order-coordinator";
 
 export interface MakerEngineSnapshot {
   accountSnapshot: AsterAccountSnapshot | null;
@@ -45,14 +45,14 @@ export interface MakerEngineSnapshot {
 import { makeOrderPlan } from "./lib/order-plan";
 import { safeCancelOrder } from "./lib/orders";
 import { RateLimitController } from "./lib/rate-limit";
-import { 
-  type TradingStatsSummary, 
-  createEmptyStats, 
+import {
+  type TradingStatsSummary,
+  createEmptyStats,
   createEmptyHourlyStats,
   updateStatsWithRealTrade,
   shouldResetHourlyStats,
   resetHourlyStats,
-  type TradeData
+  type TradeData,
 } from "./trading-stats";
 import type { TradeExecutionData } from "../exchanges/adapter";
 
@@ -114,34 +114,47 @@ export class MakerEngine {
 
   // 交易统计数据
   private tradingStats: TradingStatsSummary;
+  private startTime: number = 0;
 
-  constructor(private readonly config: MakerConfig, private readonly exchange: ExchangeAdapter) {
+  constructor(
+    private readonly config: MakerConfig,
+    private readonly exchange: ExchangeAdapter
+  ) {
     this.tradeLog = createTradeLog(this.config.maxLogEntries);
-    this.rateLimit = new RateLimitController(this.config.refreshIntervalMs, (type, detail) =>
-      this.tradeLog.push(type, detail)
+    this.rateLimit = new RateLimitController(
+      this.config.refreshIntervalMs,
+      (type, detail) => this.tradeLog.push(type, detail)
     );
-    
+
     // 初始化交易统计数据
     const now = Date.now();
     this.tradingStats = {
       total: createEmptyStats(now),
       hourly: createEmptyHourlyStats(now),
     };
-    
+
     this.bootstrap();
   }
 
   start(): void {
     if (this.timer) return;
+
+    this.startTime = Date.now();
     this.timer = setInterval(() => {
       void this.tick();
     }, this.config.refreshIntervalMs);
+
+    // 发送启动通知
+    void this.sendStartNotification();
   }
 
   stop(): void {
     if (this.timer) {
       clearInterval(this.timer);
       this.timer = null;
+
+      // 发送停止通知
+      void this.sendStopNotification();
     }
   }
 
@@ -163,11 +176,18 @@ export class MakerEngine {
   getSnapshot(): MakerEngineSnapshot {
     // 检查并重置小时统计数据
     if (shouldResetHourlyStats(this.tradingStats.hourly)) {
-      resetHourlyStats(this.tradingStats.hourly);
+      resetHourlyStats(
+        this.tradingStats.hourly,
+        this.tradingStats.total,
+        this.config.symbol
+      );
     }
 
     const { topBid, topAsk } = getTopPrices(this.depthSnapshot);
-    const ready = this.accountSnapshot !== null && this.depthSnapshot !== null && this.initialOrderSnapshotReady;
+    const ready =
+      this.accountSnapshot !== null &&
+      this.depthSnapshot !== null &&
+      this.initialOrderSnapshotReady;
     const position = getPosition(this.accountSnapshot, this.config.symbol);
     const spread = topBid && topAsk ? topAsk - topBid : 0;
     const pnl = computePositionPnl(position, this.tickerSnapshot);
@@ -180,10 +200,10 @@ export class MakerEngine {
       desiredOrders: [...this.desiredOrders],
       sessionQuoteVolume: this.sessionQuoteVolume,
       accountUnrealized: this.accountUnrealized,
-      tradeLog: this.tradeLog.all().map(entry => ({
+      tradeLog: this.tradeLog.all().map((entry) => ({
         type: entry.type,
         timestamp: entry.eventTime || Date.now(),
-        message: entry.detail
+        message: entry.detail,
       })),
       lastUpdated: Date.now(),
       ready,
@@ -194,7 +214,7 @@ export class MakerEngine {
       position: {
         positionAmt: position.positionAmt,
         entryPrice: position.entryPrice,
-        side: position.positionSide || "BOTH"
+        side: position.positionSide || "BOTH",
       },
       pnl,
       sessionVolume: this.sessionQuoteVolume,
@@ -230,9 +250,14 @@ export class MakerEngine {
         try {
           this.syncLocksWithOrders(orders);
           this.openOrders = Array.isArray(orders)
-            ? orders.filter((order) => order.type !== "MARKET" && order.symbol === this.config.symbol)
+            ? orders.filter(
+                (order) =>
+                  order.type !== "MARKET" && order.symbol === this.config.symbol
+              )
             : [];
-          const currentIds = new Set(this.openOrders.map((order) => order.orderId));
+          const currentIds = new Set(
+            this.openOrders.map((order) => order.orderId)
+          );
           for (const id of Array.from(this.pendingCancelOrders)) {
             if (!currentIds.has(id)) {
               this.pendingCancelOrders.delete(id);
@@ -310,7 +335,12 @@ export class MakerEngine {
       const pendingId = this.pending[type];
       if (!pendingId) return;
       const match = list.find((order) => String(order.orderId) === pendingId);
-      if (!match || (match.status && match.status !== "NEW" && match.status !== "PARTIALLY_FILLED")) {
+      if (
+        !match ||
+        (match.status &&
+          match.status !== "NEW" &&
+          match.status !== "PARTIALLY_FILLED")
+      ) {
         unlockOperating(this.locks, this.timers, this.pending, type);
       }
     });
@@ -349,8 +379,14 @@ export class MakerEngine {
         return;
       }
 
-      const bidPrice = roundDownToTick(topBid - this.config.bidOffset, this.config.priceTick);
-      const askPrice = roundDownToTick(topAsk + this.config.askOffset, this.config.priceTick);
+      const bidPrice = roundDownToTick(
+        topBid - this.config.bidOffset,
+        this.config.priceTick
+      );
+      const askPrice = roundDownToTick(
+        topAsk + this.config.askOffset,
+        this.config.priceTick
+      );
       const position = getPosition(this.accountSnapshot, this.config.symbol);
       const absPosition = Math.abs(position.positionAmt);
       const desired: DesiredOrder[] = [];
@@ -359,13 +395,29 @@ export class MakerEngine {
       if (absPosition < EPS) {
         this.entryPricePendingLogged = false;
         if (canEnter) {
-          desired.push({ side: "BUY", price: bidPrice, amount: this.config.tradeAmount, reduceOnly: false });
-          desired.push({ side: "SELL", price: askPrice, amount: this.config.tradeAmount, reduceOnly: false });
+          desired.push({
+            side: "BUY",
+            price: bidPrice,
+            amount: this.config.tradeAmount,
+            reduceOnly: false,
+          });
+          desired.push({
+            side: "SELL",
+            price: askPrice,
+            amount: this.config.tradeAmount,
+            reduceOnly: false,
+          });
         }
       } else {
-        const closeSide: "BUY" | "SELL" = position.positionAmt > 0 ? "SELL" : "BUY";
+        const closeSide: "BUY" | "SELL" =
+          position.positionAmt > 0 ? "SELL" : "BUY";
         const closePrice = closeSide === "SELL" ? askPrice : bidPrice;
-        desired.push({ side: closeSide, price: closePrice, amount: absPosition, reduceOnly: true });
+        desired.push({
+          side: closeSide,
+          price: closePrice,
+          amount: absPosition,
+          reduceOnly: true,
+        });
       }
 
       this.desiredOrders = desired;
@@ -394,8 +446,14 @@ export class MakerEngine {
     if (Math.abs(position.positionAmt) < EPS) return;
     const { topBid, topAsk } = getTopPrices(this.depthSnapshot);
     if (topBid == null || topAsk == null) return;
-    const bidPrice = roundDownToTick(topBid - this.config.bidOffset, this.config.priceTick);
-    const askPrice = roundDownToTick(topAsk + this.config.askOffset, this.config.priceTick);
+    const bidPrice = roundDownToTick(
+      topBid - this.config.bidOffset,
+      this.config.priceTick
+    );
+    const askPrice = roundDownToTick(
+      topAsk + this.config.askOffset,
+      this.config.priceTick
+    );
     await this.checkRisk(position, bidPrice, askPrice);
     await this.flushOrders();
   }
@@ -431,8 +489,14 @@ export class MakerEngine {
 
   private async syncOrders(targets: DesiredOrder[]): Promise<void> {
     const tolerance = this.config.priceChaseThreshold;
-    const availableOrders = this.openOrders.filter((o) => !this.pendingCancelOrders.has(o.orderId));
-    const { toCancel, toPlace } = makeOrderPlan(availableOrders, targets, tolerance);
+    const availableOrders = this.openOrders.filter(
+      (o) => !this.pendingCancelOrders.has(o.orderId)
+    );
+    const { toCancel, toPlace } = makeOrderPlan(
+      availableOrders,
+      targets,
+      tolerance
+    );
 
     for (const order of toCancel) {
       if (this.pendingCancelOrders.has(order.orderId)) continue;
@@ -450,12 +514,16 @@ export class MakerEngine {
         () => {
           this.tradeLog.push("order", "撤销时发现订单已被成交/取消，忽略");
           this.pendingCancelOrders.delete(order.orderId);
-          this.openOrders = this.openOrders.filter((existing) => existing.orderId !== order.orderId);
+          this.openOrders = this.openOrders.filter(
+            (existing) => existing.orderId !== order.orderId
+          );
         },
         (error) => {
           this.tradeLog.push("error", `撤销订单失败: ${String(error)}`);
           this.pendingCancelOrders.delete(order.orderId);
-          this.openOrders = this.openOrders.filter((existing) => existing.orderId !== order.orderId);
+          this.openOrders = this.openOrders.filter(
+            (existing) => existing.orderId !== order.orderId
+          );
         }
       );
     }
@@ -477,24 +545,37 @@ export class MakerEngine {
           (type, detail) => this.tradeLog.push(type, detail),
           target.reduceOnly,
           {
-            markPrice: getPosition(this.accountSnapshot, this.config.symbol).markPrice,
+            markPrice: getPosition(this.accountSnapshot, this.config.symbol)
+              .markPrice,
             maxPct: this.config.maxCloseSlippagePct,
           }
         );
       } catch (error) {
-        this.tradeLog.push("error", `挂单失败(${target.side} ${target.price}): ${String(error)}`);
+        this.tradeLog.push(
+          "error",
+          `挂单失败(${target.side} ${target.price}): ${String(error)}`
+        );
       }
     }
   }
 
-  private async checkRisk(position: PositionSnapshot, bidPrice: number, askPrice: number): Promise<void> {
+  private async checkRisk(
+    position: PositionSnapshot,
+    bidPrice: number,
+    askPrice: number
+  ): Promise<void> {
     const absPosition = Math.abs(position.positionAmt);
     if (absPosition < EPS) return;
 
-    const hasEntryPrice = Number.isFinite(position.entryPrice) && Math.abs(position.entryPrice) > 1e-8;
+    const hasEntryPrice =
+      Number.isFinite(position.entryPrice) &&
+      Math.abs(position.entryPrice) > 1e-8;
     if (!hasEntryPrice) {
       if (!this.entryPricePendingLogged) {
-        this.tradeLog.push("info", "做市持仓均价未同步，等待账户快照刷新后再执行止损判断");
+        this.tradeLog.push(
+          "info",
+          "做市持仓均价未同步，等待账户快照刷新后再执行止损判断"
+        );
         this.entryPricePendingLogged = true;
       }
       return;
@@ -502,7 +583,12 @@ export class MakerEngine {
     this.entryPricePendingLogged = false;
 
     const pnl = computePositionPnl(position, bidPrice, askPrice);
-    const triggerStop = shouldStopLoss(position, bidPrice, askPrice, this.config.lossLimit);
+    const triggerStop = shouldStopLoss(
+      position,
+      bidPrice,
+      askPrice,
+      this.config.lossLimit
+    );
 
     if (triggerStop) {
       // 价格操纵保护：只有平仓方向价格与标记价格在阈值内才允许市价平仓
@@ -510,7 +596,9 @@ export class MakerEngine {
       const closeSidePrice = closeSideIsSell ? bidPrice : askPrice;
       this.tradeLog.push(
         "stop",
-        `触发止损，方向=${position.positionAmt > 0 ? "多" : "空"} 当前亏损=${pnl.toFixed(4)} USDT`
+        `触发止损，方向=${
+          position.positionAmt > 0 ? "多" : "空"
+        } 当前亏损=${pnl.toFixed(4)} USDT`
       );
       try {
         await this.flushOrders();
@@ -555,12 +643,16 @@ export class MakerEngine {
         () => {
           this.tradeLog.push("order", "订单已不存在，撤销跳过");
           this.pendingCancelOrders.delete(order.orderId);
-          this.openOrders = this.openOrders.filter((existing) => existing.orderId !== order.orderId);
+          this.openOrders = this.openOrders.filter(
+            (existing) => existing.orderId !== order.orderId
+          );
         },
         (error) => {
           this.tradeLog.push("error", `撤销订单失败: ${String(error)}`);
           this.pendingCancelOrders.delete(order.orderId);
-          this.openOrders = this.openOrders.filter((existing) => existing.orderId !== order.orderId);
+          this.openOrders = this.openOrders.filter(
+            (existing) => existing.orderId !== order.orderId
+          );
         }
       );
     }
@@ -592,7 +684,11 @@ export class MakerEngine {
 
     // 检查是否需要重置小时统计
     if (shouldResetHourlyStats(this.tradingStats.hourly)) {
-      resetHourlyStats(this.tradingStats.hourly);
+      resetHourlyStats(
+        this.tradingStats.hourly,
+        this.tradingStats.total,
+        this.config.symbol
+      );
     }
 
     return {
@@ -658,7 +754,15 @@ export class MakerEngine {
     // 记录交易日志
     this.tradeLog.push(
       "trade",
-      `真实交易: ${tradeData.isMaker ? 'Maker' : 'Taker'} | 价格=${trade.price.toFixed(4)} | 数量=${trade.qty.toFixed(4)} | 成交额=${trade.volume.toFixed(2)} USDT | 手续费=${trade.commission.toFixed(4)} USDT | 盈亏=${trade.realizedPnl.toFixed(4)} USDT`
+      `真实交易: ${
+        tradeData.isMaker ? "Maker" : "Taker"
+      } | 价格=${trade.price.toFixed(4)} | 数量=${trade.qty.toFixed(
+        4
+      )} | 成交额=${trade.volume.toFixed(
+        2
+      )} USDT | 手续费=${trade.commission.toFixed(
+        4
+      )} USDT | 盈亏=${trade.realizedPnl.toFixed(4)} USDT`
     );
 
     // 发出更新
@@ -667,5 +771,44 @@ export class MakerEngine {
 
   private getReferencePrice(): number | null {
     return getMidOrLast(this.depthSnapshot, this.tickerSnapshot);
+  }
+
+  private async sendStartNotification(): Promise<void> {
+    try {
+      const { getTelegramNotifier } = await import(
+        "../utils/telegram-notifier"
+      );
+      const notifier = getTelegramNotifier();
+      if (notifier) {
+        await notifier.sendStartNotification(this.config.symbol, "Maker策略");
+      }
+    } catch (error) {
+      console.error("发送启动通知失败:", error);
+    }
+  }
+
+  private async sendStopNotification(): Promise<void> {
+    try {
+      const { getTelegramNotifier } = await import(
+        "../utils/telegram-notifier"
+      );
+      const notifier = getTelegramNotifier();
+      if (notifier && this.startTime > 0) {
+        const runtime = Date.now() - this.startTime;
+        const totalTrades =
+          this.tradingStats.total.makerOrderCount +
+          this.tradingStats.total.takerOrderCount;
+
+        await notifier.sendStopNotification(this.config.symbol, "Maker策略", {
+          runtime,
+          totalTrades,
+          totalFees: this.tradingStats.total.totalFees,
+          totalPnl: this.tradingStats.total.totalPnl,
+          totalVolume: this.tradingStats.total.totalVolume,
+        });
+      }
+    } catch (error) {
+      console.error("发送停止通知失败:", error);
+    }
   }
 }
