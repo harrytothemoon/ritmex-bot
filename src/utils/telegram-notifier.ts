@@ -193,6 +193,59 @@ export class TelegramNotifier {
   }
 
   /**
+   * 发送错误通知
+   */
+  async sendErrorNotification(
+    error: unknown,
+    strategyType: string,
+    symbol: string,
+    isRateLimitError: boolean = false
+  ): Promise<boolean> {
+    if (!this.enabled) {
+      return true;
+    }
+
+    try {
+      const errorMessage = this.extractErrorMessage(error);
+      const errorIcon = isRateLimitError ? "⚠️" : "🚨";
+      const errorType = isRateLimitError ? "限频错误 (429)" : "运行错误";
+
+      const message = `${errorIcon} *${errorType}警报*
+
+📊 *策略*: ${strategyType}
+💰 *交易对*: ${symbol}
+🕐 *时间*: ${new Date().toLocaleString("zh-CN", {
+        timeZone: "Asia/Shanghai",
+      })}
+
+❌ *错误信息*:
+\`\`\`
+${errorMessage}
+\`\`\`
+
+${isRateLimitError ? "⏸️ 已自动触发降频/暂停机制" : "⚠️ 请检查策略运行状态"}`;
+
+      return await this.sendMessage(message);
+    } catch (err) {
+      console.error("发送错误通知失败:", err);
+      return false;
+    }
+  }
+
+  /**
+   * 提取错误信息
+   */
+  private extractErrorMessage(error: unknown): string {
+    if (typeof error === "string") return error;
+    if (error instanceof Error) return error.message;
+    try {
+      return JSON.stringify(error);
+    } catch {
+      return String(error);
+    }
+  }
+
+  /**
    * 测试Telegram连接
    */
   async testConnection(): Promise<boolean> {

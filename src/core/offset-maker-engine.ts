@@ -380,8 +380,16 @@ export class OffsetMakerEngine {
         this.rateLimit.registerRateLimit("offset-maker");
         await this.enforceRateLimitStop();
         this.tradeLog.push("warn", `OffsetMakerEngine 429: ${String(error)}`);
+        // 发送 429 错误通知
+        this.sendErrorNotification(error, true).catch((err) =>
+          console.error("发送429错误通知失败:", err)
+        );
       } else {
         this.tradeLog.push("error", `偏移做市循环异常: ${String(error)}`);
+        // 发送普通错误通知
+        this.sendErrorNotification(error, false).catch((err) =>
+          console.error("发送错误通知失败:", err)
+        );
       }
       this.emitUpdate();
     } finally {
@@ -826,6 +834,28 @@ export class OffsetMakerEngine {
       }
     } catch (error) {
       console.error("发送启动通知失败:", error);
+    }
+  }
+
+  private async sendErrorNotification(
+    error: unknown,
+    isRateLimitError: boolean
+  ): Promise<void> {
+    try {
+      const { getTelegramNotifier } = await import(
+        "../utils/telegram-notifier"
+      );
+      const notifier = getTelegramNotifier();
+      if (notifier) {
+        await notifier.sendErrorNotification(
+          error,
+          "偏移Maker策略",
+          this.config.symbol,
+          isRateLimitError
+        );
+      }
+    } catch (err) {
+      console.error("发送错误通知失败:", err);
     }
   }
 

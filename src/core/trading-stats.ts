@@ -106,7 +106,8 @@ export function updateStatsWithRealTrade(
 
 export function shouldResetHourlyStats(hourlyStats: HourlyStats): boolean {
   const now = Date.now();
-  const oneHour = 60 * 60 * 1000; // 1小时的毫秒数
+  const oneHour =
+    parseFloat(process?.env?.REPORT_INTERVAL_MIN || "60") * 60 * 1000; // 1小时的毫秒数
   return now - hourlyStats.hourStartTime >= oneHour;
 }
 
