@@ -1,7 +1,7 @@
 import React from "react";
 import { Box, Text } from "ink";
 import type { DepthImbalanceSnapshot } from "../core/depth-imbalance-engine";
-import { DataTable } from "./components/DataTable";
+import { KeyValueTable } from "./components/KeyValueTable";
 
 interface DepthImbalanceAppProps {
   snapshot: DepthImbalanceSnapshot;
@@ -138,7 +138,7 @@ export function DepthImbalanceApp({ snapshot }: DepthImbalanceAppProps) {
 
   // 小时统计
   const hourlyStats = tradingStats.hourly;
-  const hourStartTime = new Date(hourlyStats.periodStart).toLocaleTimeString(
+  const hourStartTime = new Date(hourlyStats.hourStartTime).toLocaleTimeString(
     "zh-CN",
     { hour: "2-digit", minute: "2-digit" }
   );
@@ -206,19 +206,19 @@ export function DepthImbalanceApp({ snapshot }: DepthImbalanceAppProps) {
           <Text bold underline>
             市场深度
           </Text>
-          <DataTable data={depthRows} />
+          <KeyValueTable data={depthRows} />
         </Box>
         <Box flexDirection="column" marginRight={2}>
           <Text bold underline>
             持仓信息
           </Text>
-          <DataTable data={positionRows} />
+          <KeyValueTable data={positionRows} />
         </Box>
         <Box flexDirection="column">
           <Text bold underline>
             平仓信号
           </Text>
-          <DataTable data={closeSignalRows} />
+          <KeyValueTable data={closeSignalRows} />
         </Box>
       </Box>
 
@@ -227,19 +227,19 @@ export function DepthImbalanceApp({ snapshot }: DepthImbalanceAppProps) {
           <Text bold underline>
             总计统计
           </Text>
-          <DataTable data={totalStatsRows} />
+          <KeyValueTable data={totalStatsRows} />
         </Box>
         <Box flexDirection="column" marginRight={2}>
           <Text bold underline>
             小时统计
           </Text>
-          <DataTable data={hourlyStatsRows} />
+          <KeyValueTable data={hourlyStatsRows} />
         </Box>
         <Box flexDirection="column">
           <Text bold underline>
             账户信息
           </Text>
-          <DataTable data={accountRows} />
+          <KeyValueTable data={accountRows} />
         </Box>
       </Box>
 
