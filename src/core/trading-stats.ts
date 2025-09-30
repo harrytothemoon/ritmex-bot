@@ -8,6 +8,8 @@ export interface TradingStats {
   totalFees: number;
   // 盈亏总计(已实现盈亏)
   totalPnl: number;
+  // 净收益 (已实现盈亏 - 手续费)
+  netPnl: number;
   // 成交量总计
   totalVolume: number;
   // 积分率 (每万点积分的耗损)
@@ -34,6 +36,7 @@ export function createEmptyStats(startTime: number = Date.now()): TradingStats {
     takerOrderCount: 0,
     totalFees: 0,
     totalPnl: 0,
+    netPnl: 0,
     totalVolume: 0,
     pointsRate: 0,
     startTime,
@@ -96,6 +99,7 @@ export function updateStatsWithRealTrade(
 
   stats.totalFees += tradeData.commission;
   stats.totalPnl += tradeData.realizedPnl;
+  stats.netPnl = stats.totalPnl - stats.totalFees; // 净收益 = 已实现盈亏 - 手续费
   stats.totalVolume += tradeData.volume;
   stats.pointsRate = calculatePointsRate(
     stats.totalFees,
@@ -126,6 +130,7 @@ export async function resetHourlyStats(
   hourlyStats.takerOrderCount = 0;
   hourlyStats.totalFees = 0;
   hourlyStats.totalPnl = 0;
+  hourlyStats.netPnl = 0;
   hourlyStats.totalVolume = 0;
   hourlyStats.pointsRate = 0;
   hourlyStats.hourStartTime = now;
