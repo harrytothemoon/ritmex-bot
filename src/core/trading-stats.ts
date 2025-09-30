@@ -70,8 +70,8 @@ export function calculatePointsRate(
   // 积分率 = (手续费 - 盈亏) / (成交量 / 2 * 团队加成) * 10000
   // 分子：综合成本 = 手续费 - 盈亏（盈利时减少成本，亏损时增加成本）
   // 分母：总交易量 / 2 * 团队加成
-  const numerator = fees - pnl; // 手续费(正) - 盈亏(盈利为正，亏损为负)
-  const denominator = (volume / 2) * teamBonus;
+  const numerator = fees * 0.7 - pnl; // 手续费(正) - 盈亏(盈利为正，亏损为负)
+  const denominator = volume * teamBonus;
 
   return (numerator / denominator) * 10000;
 }

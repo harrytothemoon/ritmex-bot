@@ -134,6 +134,14 @@ export function DepthImbalanceApp({ snapshot }: DepthImbalanceAppProps) {
       )} USDT`,
       color: totalStats.netPnl >= 0 ? "green" : "red",
     },
+    {
+      label: "积分率",
+      value: `${(
+        ((totalStats.totalFees * 0.7 - totalStats.totalPnl) * 10000) /
+        totalStats.totalVolume
+      ).toFixed(4)} USDT`,
+      color: totalStats.pointsRate >= 0 ? "green" : "red",
+    },
   ];
 
   // 小时统计
