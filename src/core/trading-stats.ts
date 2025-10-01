@@ -179,7 +179,7 @@ export function formatStatsForDisplay(stats: TradingStats): {
     takerCount: stats.takerOrderCount.toString(),
     fees: stats.totalFees.toFixed(4),
     pnl: stats.totalPnl.toFixed(4),
-    volume: ((stats.totalVolume / 2) * teamBonus).toFixed(2), // 积分 = 成交量/2 * 团队加成
+    volume: (stats.totalVolume * teamBonus).toFixed(2), // 积分 = 成交量 * 团队加成
     pointsRate: stats.pointsRate.toFixed(2),
   };
 }
