@@ -201,7 +201,9 @@ export class TelegramNotifier {
     previousAmount: number,
     newAmount: number,
     attemptNumber: number,
-    reason: string = "保证金不足"
+    reason: string = "保证金不足",
+    previousLossLimit?: number,
+    newLossLimit?: number
   ): Promise<boolean> {
     if (!this.enabled) {
       return true;
@@ -213,7 +215,7 @@ export class TelegramNotifier {
         100
       ).toFixed(0);
 
-      const message = `⚠️ *交易数量调整通知*
+      let message = `⚠️ *交易数量调整通知*
 
 📊 *策略*: ${strategyType}
 💰 *交易对*: ${symbol}
@@ -226,9 +228,20 @@ export class TelegramNotifier {
 • 新数量: ${newAmount.toFixed(8)}
 • 减少: ${reductionPercent}%
 • 尝试次数: ${attemptNumber}
-• 原因: ${reason}
+• 原因: ${reason}`;
 
-💡 系统将使用新的交易数量继续尝试下单`;
+      if (previousLossLimit !== undefined && newLossLimit !== undefined) {
+        message += `
+
+🛡️ *止损调整*:
+• 原始止损: ${previousLossLimit.toFixed(4)} USDT
+• 新止损: ${newLossLimit.toFixed(4)} USDT
+• 减少: ${reductionPercent}%`;
+      }
+
+      message += `
+
+💡 系统将使用新的交易数量和止损限制继续尝试下单`;
 
       return await this.sendMessage(message);
     } catch (error) {

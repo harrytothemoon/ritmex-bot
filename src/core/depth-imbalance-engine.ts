@@ -44,6 +44,8 @@ export interface DepthImbalanceSnapshot {
   position: PositionSnapshot;
   pnl: number;
   accountUnrealized: number;
+  accountBalance: number; // 账户总余额
+  availableBalance: number; // 可用余额
   sessionVolume: number;
   tradeLog: TradeLogEntry[];
   lastUpdated: number;
@@ -58,6 +60,9 @@ export interface DepthImbalanceSnapshot {
   currentTradeAmount: number;
   initialTradeAmount: number;
   minTradeAmount: number;
+  // 止损限制管理
+  currentLossLimit: number;
+  initialLossLimit: number;
   // 交易统计信息
   tradingStats: TradingStatsSummary;
 }
@@ -86,6 +91,8 @@ export class DepthImbalanceEngine {
   private timer: ReturnType<typeof setInterval> | null = null;
   private processing = false;
   private accountUnrealized = 0;
+  private accountBalance = 0;
+  private availableBalance = 0;
   private sessionQuoteVolume = 0;
   private prevPositionAmt = 0;
   private initializedPosition = false;
@@ -104,6 +111,8 @@ export class DepthImbalanceEngine {
   private currentTradeAmount: number;
   private readonly minTradeAmount: number;
   private readonly maxRetryAttempts: number;
+  // 动态止损限制管理
+  private currentLossLimit: number;
 
   constructor(
     private readonly config: DepthImbalanceConfig,
@@ -119,6 +128,8 @@ export class DepthImbalanceEngine {
     this.minTradeAmount = this.config.tradeAmount / 128;
     // 最大尝试次数：初始尝试 + 减半次数
     this.maxRetryAttempts = 10;
+    // 初始化止损限制（与交易数量同步调整）
+    this.currentLossLimit = this.config.lossLimit;
     this.tradeLog = createTradeLog(this.config.maxLogEntries);
     this.rateLimit = new RateLimitController(
       this.config.refreshIntervalMs,
@@ -145,7 +156,7 @@ export class DepthImbalanceEngine {
 
     this.tradeLog.push(
       "info",
-      `深度不平衡策略启动 | 最小深度=${this.config.minDepthQty} | 不平衡倍数=${this.config.imbalanceRatio}x | 平仓阈值=${this.config.closeBalanceRatio}% | 初始交易量=${this.currentTradeAmount}`
+      `深度不平衡策略启动 | 最小深度=${this.config.minDepthQty} | 不平衡倍数=${this.config.imbalanceRatio}x | 平仓阈值=${this.config.closeBalanceRatio}% | 初始交易量=${this.currentTradeAmount} | 止损限制=${this.currentLossLimit} USDT`
     );
 
     // 发送启动通知
@@ -190,6 +201,15 @@ export class DepthImbalanceEngine {
           const totalUnrealized = Number(snapshot.totalUnrealizedProfit ?? "0");
           if (Number.isFinite(totalUnrealized)) {
             this.accountUnrealized = totalUnrealized;
+          }
+          // 更新账户余额
+          const totalBalance = Number(snapshot.totalWalletBalance ?? "0");
+          if (Number.isFinite(totalBalance)) {
+            this.accountBalance = totalBalance;
+          }
+          const available = Number(snapshot.availableBalance ?? "0");
+          if (Number.isFinite(available)) {
+            this.availableBalance = available;
           }
           const position = getPosition(snapshot, this.config.symbol);
           this.updateSessionVolume(position);
@@ -444,12 +464,12 @@ export class DepthImbalanceEngine {
     if (absPosition < EPS) return;
 
     const pnl = computePositionPnl(position, topBid, topAsk);
-    if (pnl <= -this.config.lossLimit) {
+    if (pnl <= -this.currentLossLimit) {
       this.tradeLog.push(
         "stop",
         `触发止损 | 当前亏损=${pnl.toFixed(4)} USDT 超过限制=${
-          this.config.lossLimit
-        }`
+          this.currentLossLimit
+        } USDT`
       );
       await this.marketExit(position, topBid, topAsk);
     }
@@ -482,15 +502,18 @@ export class DepthImbalanceEngine {
         // 成功下单，更新当前交易数量
         this.currentTradeAmount = attemptAmount;
 
+        const adjustmentInfo =
+          attemptAmount < this.config.tradeAmount
+            ? ` | 已调整交易量（原始: ${this.config.tradeAmount.toFixed(
+                8
+              )}，当前止损: ${this.currentLossLimit.toFixed(4)} USDT）`
+            : "";
+
         this.tradeLog.push(
           "order",
           `市价${side === "BUY" ? "买入" : "卖出"} ${attemptAmount.toFixed(
             8
-          )} | 订单ID=${result.orderId}${
-            attemptAmount < this.config.tradeAmount
-              ? ` | 已调整交易量（原始: ${this.config.tradeAmount.toFixed(8)}）`
-              : ""
-          }`
+          )} | 订单ID=${result.orderId}${adjustmentInfo}`
         );
 
         return; // 成功，退出
@@ -498,9 +521,11 @@ export class DepthImbalanceEngine {
         attempts++;
 
         if (isInsufficientMarginError(error)) {
-          // 保证金不足，减半交易数量
+          // 保证金不足，减半交易数量和止损限制
           const previousAmount = attemptAmount;
+          const previousLossLimit = this.currentLossLimit;
           attemptAmount = attemptAmount / 2;
+          this.currentLossLimit = this.currentLossLimit / 2;
 
           this.tradeLog.push(
             "warn",
@@ -508,14 +533,20 @@ export class DepthImbalanceEngine {
               this.maxRetryAttempts
             }）| 将交易量从 ${previousAmount.toFixed(
               8
-            )} 减半至 ${attemptAmount.toFixed(8)}`
+            )} 减半至 ${attemptAmount.toFixed(
+              8
+            )} | 止损限制从 ${previousLossLimit.toFixed(
+              4
+            )} 减半至 ${this.currentLossLimit.toFixed(4)} USDT`
           );
 
           // 发送Telegram通知
           this.sendTradeAmountAdjustmentNotification(
             previousAmount,
             attemptAmount,
-            attempts
+            attempts,
+            previousLossLimit,
+            this.currentLossLimit
           ).catch((err) => console.error("发送交易数量调整通知失败:", err));
 
           // 如果还有重试机会，继续循环
@@ -688,6 +719,8 @@ export class DepthImbalanceEngine {
       position,
       pnl,
       accountUnrealized: this.accountUnrealized,
+      accountBalance: this.accountBalance,
+      availableBalance: this.availableBalance,
       sessionVolume: this.sessionQuoteVolume,
       tradeLog: this.tradeLog.all(),
       lastUpdated: Date.now(),
@@ -700,6 +733,8 @@ export class DepthImbalanceEngine {
       currentTradeAmount: this.currentTradeAmount,
       initialTradeAmount: this.config.tradeAmount,
       minTradeAmount: this.minTradeAmount,
+      currentLossLimit: this.currentLossLimit,
+      initialLossLimit: this.config.lossLimit,
       tradingStats: {
         total: { ...this.tradingStats.total },
         hourly: { ...this.tradingStats.hourly },
@@ -832,7 +867,9 @@ export class DepthImbalanceEngine {
   private async sendTradeAmountAdjustmentNotification(
     previousAmount: number,
     newAmount: number,
-    attemptNumber: number
+    attemptNumber: number,
+    previousLossLimit?: number,
+    newLossLimit?: number
   ): Promise<void> {
     try {
       const { getTelegramNotifier } = await import(
@@ -846,7 +883,9 @@ export class DepthImbalanceEngine {
           previousAmount,
           newAmount,
           attemptNumber,
-          "保证金不足"
+          "保证金不足",
+          previousLossLimit,
+          newLossLimit
         );
       }
     } catch (error) {

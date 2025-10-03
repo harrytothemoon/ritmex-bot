@@ -19,6 +19,8 @@ export function DepthImbalanceApp({ snapshot }: DepthImbalanceAppProps) {
     position,
     pnl,
     accountUnrealized,
+    accountBalance,
+    availableBalance,
     sessionVolume,
     tradeLog,
     hasPosition,
@@ -30,6 +32,8 @@ export function DepthImbalanceApp({ snapshot }: DepthImbalanceAppProps) {
     currentTradeAmount,
     initialTradeAmount,
     minTradeAmount,
+    currentLossLimit,
+    initialLossLimit,
     tradingStats,
   } = snapshot;
 
@@ -190,6 +194,16 @@ export function DepthImbalanceApp({ snapshot }: DepthImbalanceAppProps) {
   // 账户信息
   const accountRows = [
     {
+      label: "账户总余额",
+      value: `${accountBalance.toFixed(2)} USDT`,
+      color: "cyan",
+    },
+    {
+      label: "可用余额",
+      value: `${availableBalance.toFixed(2)} USDT`,
+      color: "green",
+    },
+    {
       label: "账户浮亏",
       value: `${accountUnrealized >= 0 ? "+" : ""}${accountUnrealized.toFixed(
         4
@@ -204,6 +218,7 @@ export function DepthImbalanceApp({ snapshot }: DepthImbalanceAppProps) {
 
   // 交易数量信息
   const tradeAmountAdjusted = currentTradeAmount < initialTradeAmount;
+  const lossLimitAdjusted = currentLossLimit < initialLossLimit;
   const tradeAmountRows = [
     {
       label: "当前交易量",
@@ -217,6 +232,15 @@ export function DepthImbalanceApp({ snapshot }: DepthImbalanceAppProps) {
     {
       label: "最小限制",
       value: minTradeAmount.toFixed(8),
+    },
+    {
+      label: "当前止损",
+      value: `${currentLossLimit.toFixed(4)} USDT`,
+      color: lossLimitAdjusted ? "yellow" : "green",
+    },
+    {
+      label: "初始止损",
+      value: `${initialLossLimit.toFixed(4)} USDT`,
     },
   ];
 
@@ -272,8 +296,10 @@ export function DepthImbalanceApp({ snapshot }: DepthImbalanceAppProps) {
         </Box>
         <Box flexDirection="column">
           <Text bold underline>
-            交易数量
-            {tradeAmountAdjusted && <Text color="yellow"> ⚠</Text>}
+            风险管理
+            {(tradeAmountAdjusted || lossLimitAdjusted) && (
+              <Text color="yellow"> ⚠</Text>
+            )}
           </Text>
           <KeyValueTable data={tradeAmountRows} />
         </Box>
