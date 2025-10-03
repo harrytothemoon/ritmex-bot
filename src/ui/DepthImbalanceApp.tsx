@@ -27,6 +27,9 @@ export function DepthImbalanceApp({ snapshot }: DepthImbalanceAppProps) {
     entryAskQty,
     shouldClose,
     closeReason,
+    currentTradeAmount,
+    initialTradeAmount,
+    minTradeAmount,
     tradingStats,
   } = snapshot;
 
@@ -199,6 +202,24 @@ export function DepthImbalanceApp({ snapshot }: DepthImbalanceAppProps) {
     },
   ];
 
+  // 交易数量信息
+  const tradeAmountAdjusted = currentTradeAmount < initialTradeAmount;
+  const tradeAmountRows = [
+    {
+      label: "当前交易量",
+      value: currentTradeAmount.toFixed(8),
+      color: tradeAmountAdjusted ? "yellow" : "green",
+    },
+    {
+      label: "初始交易量",
+      value: initialTradeAmount.toFixed(8),
+    },
+    {
+      label: "最小限制",
+      value: minTradeAmount.toFixed(8),
+    },
+  ];
+
   const recentLogs = tradeLog.slice(-8);
 
   return (
@@ -243,11 +264,18 @@ export function DepthImbalanceApp({ snapshot }: DepthImbalanceAppProps) {
           </Text>
           <KeyValueTable data={hourlyStatsRows} />
         </Box>
-        <Box flexDirection="column">
+        <Box flexDirection="column" marginRight={2}>
           <Text bold underline>
             账户信息
           </Text>
           <KeyValueTable data={accountRows} />
+        </Box>
+        <Box flexDirection="column">
+          <Text bold underline>
+            交易数量
+            {tradeAmountAdjusted && <Text color="yellow"> ⚠</Text>}
+          </Text>
+          <KeyValueTable data={tradeAmountRows} />
         </Box>
       </Box>
 

@@ -193,6 +193,51 @@ export class TelegramNotifier {
   }
 
   /**
+   * 发送交易数量调整通知
+   */
+  async sendTradeAmountAdjustment(
+    symbol: string,
+    strategyType: string,
+    previousAmount: number,
+    newAmount: number,
+    attemptNumber: number,
+    reason: string = "保证金不足"
+  ): Promise<boolean> {
+    if (!this.enabled) {
+      return true;
+    }
+
+    try {
+      const reductionPercent = (
+        ((previousAmount - newAmount) / previousAmount) *
+        100
+      ).toFixed(0);
+
+      const message = `⚠️ *交易数量调整通知*
+
+📊 *策略*: ${strategyType}
+💰 *交易对*: ${symbol}
+🕐 *时间*: ${new Date().toLocaleString("zh-CN", {
+        timeZone: "Asia/Shanghai",
+      })}
+
+📉 *调整信息*:
+• 原始数量: ${previousAmount.toFixed(8)}
+• 新数量: ${newAmount.toFixed(8)}
+• 减少: ${reductionPercent}%
+• 尝试次数: ${attemptNumber}
+• 原因: ${reason}
+
+💡 系统将使用新的交易数量继续尝试下单`;
+
+      return await this.sendMessage(message);
+    } catch (error) {
+      console.error("发送交易数量调整通知失败:", error);
+      return false;
+    }
+  }
+
+  /**
    * 发送错误通知
    */
   async sendErrorNotification(

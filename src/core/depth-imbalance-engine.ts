@@ -7,7 +7,11 @@ import type {
   AsterOrder,
 } from "../exchanges/types";
 import { createTradeLog, type TradeLogEntry } from "../state/trade-log";
-import { isUnknownOrderError, isRateLimitError } from "../utils/errors";
+import {
+  isUnknownOrderError,
+  isRateLimitError,
+  isInsufficientMarginError,
+} from "../utils/errors";
 import { getPosition, type PositionSnapshot } from "../utils/strategy";
 import { computePositionPnl } from "../utils/pnl";
 import { getTopPrices, getMidOrLast } from "../utils/price";
@@ -50,6 +54,10 @@ export interface DepthImbalanceSnapshot {
   entryAskQty: number;
   shouldClose: boolean;
   closeReason: string | null;
+  // 交易数量管理
+  currentTradeAmount: number;
+  initialTradeAmount: number;
+  minTradeAmount: number;
   // 交易统计信息
   tradingStats: TradingStatsSummary;
 }
@@ -92,10 +100,25 @@ export class DepthImbalanceEngine {
   private tradingStats: TradingStatsSummary;
   private startTime: number = 0;
 
+  // 动态交易数量管理
+  private currentTradeAmount: number;
+  private readonly minTradeAmount: number;
+  private readonly maxRetryAttempts: number;
+
   constructor(
     private readonly config: DepthImbalanceConfig,
     private readonly exchange: ExchangeAdapter
   ) {
+    // 初始化交易数量
+    this.currentTradeAmount = this.config.tradeAmount;
+    // 设置最小交易数量为初始值的 1/64（最多减半6次）
+    // 你可以根据需要调整这个值：
+    // - 1/32 = 最多减半5次（6次尝试）
+    // - 1/64 = 最多减半6次（7次尝试）
+    // - 1/128 = 最多减半7次（8次尝试）
+    this.minTradeAmount = this.config.tradeAmount / 128;
+    // 最大尝试次数：初始尝试 + 减半次数
+    this.maxRetryAttempts = 10;
     this.tradeLog = createTradeLog(this.config.maxLogEntries);
     this.rateLimit = new RateLimitController(
       this.config.refreshIntervalMs,
@@ -122,7 +145,7 @@ export class DepthImbalanceEngine {
 
     this.tradeLog.push(
       "info",
-      `深度不平衡策略启动 | 最小深度=${this.config.minDepthQty} | 不平衡倍数=${this.config.imbalanceRatio}x | 平仓阈值=${this.config.closeBalanceRatio}%`
+      `深度不平衡策略启动 | 最小深度=${this.config.minDepthQty} | 不平衡倍数=${this.config.imbalanceRatio}x | 平仓阈值=${this.config.closeBalanceRatio}% | 初始交易量=${this.currentTradeAmount}`
     );
 
     // 发送启动通知
@@ -433,23 +456,84 @@ export class DepthImbalanceEngine {
   }
 
   private async marketEntry(side: "BUY" | "SELL"): Promise<void> {
-    try {
-      const result = await this.exchange.createOrder({
-        symbol: this.config.symbol,
-        side,
-        type: "MARKET",
-        quantity: this.config.tradeAmount,
-      });
+    let attemptAmount = this.currentTradeAmount;
+    let attempts = 0;
 
-      this.tradeLog.push(
-        "order",
-        `市价${side === "BUY" ? "买入" : "卖出"} ${
-          this.config.tradeAmount
-        } | 订单ID=${result.orderId}`
-      );
-    } catch (error) {
-      throw error;
+    while (attempts < this.maxRetryAttempts) {
+      try {
+        // 检查是否已经低于最小交易数量
+        if (attemptAmount < this.minTradeAmount) {
+          this.tradeLog.push(
+            "error",
+            `交易数量 ${attemptAmount.toFixed(
+              8
+            )} 已低于最小限制 ${this.minTradeAmount.toFixed(8)}，无法继续建仓`
+          );
+          throw new Error("交易数量已降至最小限制，仍然保证金不足");
+        }
+
+        const result = await this.exchange.createOrder({
+          symbol: this.config.symbol,
+          side,
+          type: "MARKET",
+          quantity: attemptAmount,
+        });
+
+        // 成功下单，更新当前交易数量
+        this.currentTradeAmount = attemptAmount;
+
+        this.tradeLog.push(
+          "order",
+          `市价${side === "BUY" ? "买入" : "卖出"} ${attemptAmount.toFixed(
+            8
+          )} | 订单ID=${result.orderId}${
+            attemptAmount < this.config.tradeAmount
+              ? ` | 已调整交易量（原始: ${this.config.tradeAmount.toFixed(8)}）`
+              : ""
+          }`
+        );
+
+        return; // 成功，退出
+      } catch (error) {
+        attempts++;
+
+        if (isInsufficientMarginError(error)) {
+          // 保证金不足，减半交易数量
+          const previousAmount = attemptAmount;
+          attemptAmount = attemptAmount / 2;
+
+          this.tradeLog.push(
+            "warn",
+            `保证金不足（尝试 ${attempts}/${
+              this.maxRetryAttempts
+            }）| 将交易量从 ${previousAmount.toFixed(
+              8
+            )} 减半至 ${attemptAmount.toFixed(8)}`
+          );
+
+          // 发送Telegram通知
+          this.sendTradeAmountAdjustmentNotification(
+            previousAmount,
+            attemptAmount,
+            attempts
+          ).catch((err) => console.error("发送交易数量调整通知失败:", err));
+
+          // 如果还有重试机会，继续循环
+          if (
+            attempts < this.maxRetryAttempts &&
+            attemptAmount >= this.minTradeAmount
+          ) {
+            continue;
+          }
+        }
+
+        // 其他错误或已达到最大尝试次数，抛出错误
+        throw error;
+      }
     }
+
+    // 如果执行到这里，说明所有尝试都失败了
+    throw new Error(`经过 ${this.maxRetryAttempts} 次尝试仍无法下单`);
   }
 
   private async marketExit(
@@ -613,6 +697,9 @@ export class DepthImbalanceEngine {
       entryAskQty: this.entryAskQty,
       shouldClose,
       closeReason,
+      currentTradeAmount: this.currentTradeAmount,
+      initialTradeAmount: this.config.tradeAmount,
+      minTradeAmount: this.minTradeAmount,
       tradingStats: {
         total: { ...this.tradingStats.total },
         hourly: { ...this.tradingStats.hourly },
@@ -739,6 +826,31 @@ export class DepthImbalanceEngine {
       }
     } catch (error) {
       console.error("发送停止通知失败:", error);
+    }
+  }
+
+  private async sendTradeAmountAdjustmentNotification(
+    previousAmount: number,
+    newAmount: number,
+    attemptNumber: number
+  ): Promise<void> {
+    try {
+      const { getTelegramNotifier } = await import(
+        "../utils/telegram-notifier"
+      );
+      const notifier = getTelegramNotifier();
+      if (notifier) {
+        await notifier.sendTradeAmountAdjustment(
+          this.config.symbol,
+          "深度不平衡策略",
+          previousAmount,
+          newAmount,
+          attemptNumber,
+          "保证金不足"
+        );
+      }
+    } catch (error) {
+      console.error("发送交易数量调整通知失败:", error);
     }
   }
 }

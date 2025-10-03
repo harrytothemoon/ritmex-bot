@@ -36,3 +36,29 @@ export function isRateLimitError(error: unknown): boolean {
     message.includes("request rate")
   );
 }
+
+export function isInsufficientMarginError(error: unknown): boolean {
+  if (!error) return false;
+  
+  // 检查错误代码
+  if (typeof error === "object" && "code" in error) {
+    const code = Number((error as { code?: unknown }).code);
+    // -2019: MARGIN_NOT_SUFFICIENT
+    // -2027: MAX_LEVERAGE_RATIO (Exceeded the maximum allowable position at current leverage)
+    // -2028: MIN_LEVERAGE_RATIO (Leverage is smaller than permitted: insufficient margin balance)
+    if (code === -2019 || code === -2027 || code === -2028) {
+      return true;
+    }
+  }
+  
+  // 检查错误消息
+  const message = extractMessage(error).toLowerCase();
+  return (
+    message.includes("margin") && message.includes("insufficient") ||
+    message.includes("margin is insufficient") ||
+    message.includes("insufficient margin") ||
+    message.includes("exceed") && message.includes("leverage") ||
+    message.includes("maximum allowable position") ||
+    message.includes("insufficient margin balance")
+  );
+}
