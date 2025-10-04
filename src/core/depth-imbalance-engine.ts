@@ -202,15 +202,47 @@ export class DepthImbalanceEngine {
           if (Number.isFinite(totalUnrealized)) {
             this.accountUnrealized = totalUnrealized;
           }
-          // 更新账户余额
-          const totalBalance = Number(snapshot.totalWalletBalance ?? "0");
-          if (Number.isFinite(totalBalance)) {
-            this.accountBalance = totalBalance;
+
+          // 更新账户余额 - 从 assets 数组中提取 USDT 资产
+          const usdtAsset = snapshot.assets.find(
+            (asset) => asset.asset === "USDT"
+          );
+          if (usdtAsset) {
+            const walletBalance = Number(usdtAsset.walletBalance ?? "0");
+            const availableBalance = Number(usdtAsset.availableBalance ?? "0");
+
+            if (Number.isFinite(walletBalance)) {
+              const changed =
+                Math.abs(this.accountBalance - walletBalance) > 0.01;
+              this.accountBalance = walletBalance;
+              if (changed) {
+                this.tradeLog.push(
+                  "info",
+                  `账户余额更新: ${walletBalance.toFixed(2)} USDT`
+                );
+              }
+            }
+            if (Number.isFinite(availableBalance)) {
+              this.availableBalance = availableBalance;
+            }
+          } else {
+            // 如果没有找到 USDT 资产，尝试使用 totalWalletBalance
+            const totalBalance = Number(snapshot.totalWalletBalance ?? "0");
+            if (Number.isFinite(totalBalance)) {
+              this.accountBalance = totalBalance;
+            }
+            const available = Number(snapshot.availableBalance ?? "0");
+            if (Number.isFinite(available)) {
+              this.availableBalance = available;
+            }
+
+            // 记录资产列表以便调试
+            if (snapshot.assets.length > 0) {
+              const assetList = snapshot.assets.map((a) => a.asset).join(", ");
+              this.tradeLog.push("info", `可用资产: ${assetList}`);
+            }
           }
-          const available = Number(snapshot.availableBalance ?? "0");
-          if (Number.isFinite(available)) {
-            this.availableBalance = available;
-          }
+
           const position = getPosition(snapshot, this.config.symbol);
           this.updateSessionVolume(position);
           this.emitUpdate();
@@ -408,6 +440,10 @@ export class DepthImbalanceEngine {
       this.positionSide = null;
       this.entryBidQty = 0;
       this.entryAskQty = 0;
+
+      // 建仓失败，重置交易数量和止损限制为初始值
+      this.currentTradeAmount = this.config.tradeAmount;
+      this.currentLossLimit = this.config.lossLimit;
     }
   }
 
@@ -521,23 +557,28 @@ export class DepthImbalanceEngine {
         attempts++;
 
         if (isInsufficientMarginError(error)) {
-          // 保证金不足，减半交易数量和止损限制
+          // 保证金不足，减半交易数量并按比例调整止损限制
           const previousAmount = attemptAmount;
           const previousLossLimit = this.currentLossLimit;
           attemptAmount = attemptAmount / 2;
-          this.currentLossLimit = this.currentLossLimit / 2;
+
+          // 按照交易量的比例调整止损
+          // 例如: 交易量 0.1 BTC -> 止损 6 USDT
+          //      交易量 0.01 BTC -> 止损 0.6 USDT (保持 60:1 比例)
+          const ratio = attemptAmount / this.config.tradeAmount;
+          this.currentLossLimit = this.config.lossLimit * ratio;
 
           this.tradeLog.push(
             "warn",
             `保证金不足（尝试 ${attempts}/${
               this.maxRetryAttempts
-            }）| 将交易量从 ${previousAmount.toFixed(
+            }）| 交易量 ${previousAmount.toFixed(8)} → ${attemptAmount.toFixed(
               8
-            )} 减半至 ${attemptAmount.toFixed(
-              8
-            )} | 止损限制从 ${previousLossLimit.toFixed(
+            )} (-50%) | 止损 ${previousLossLimit.toFixed(
               4
-            )} 减半至 ${this.currentLossLimit.toFixed(4)} USDT`
+            )} → ${this.currentLossLimit.toFixed(4)} USDT (${(
+              ratio * 100
+            ).toFixed(1)}%)`
           );
 
           // 发送Telegram通知
@@ -599,6 +640,21 @@ export class DepthImbalanceEngine {
       this.positionSide = null;
       this.entryBidQty = 0;
       this.entryAskQty = 0;
+
+      // 平仓成功，重置交易数量和止损限制为初始值
+      // 这样下次建仓时会从完整的交易数量开始
+      const wasAdjusted = this.currentTradeAmount < this.config.tradeAmount;
+      this.currentTradeAmount = this.config.tradeAmount;
+      this.currentLossLimit = this.config.lossLimit;
+
+      if (wasAdjusted) {
+        this.tradeLog.push(
+          "info",
+          `平仓完成，重置交易参数 | 交易量=${this.currentTradeAmount.toFixed(
+            8
+          )} | 止损=${this.currentLossLimit.toFixed(4)} USDT`
+        );
+      }
     } catch (error) {
       if (isUnknownOrderError(error)) {
         this.tradeLog.push("order", "平仓订单已不存在");
@@ -633,6 +689,13 @@ export class DepthImbalanceEngine {
           maxPct: this.config.maxCloseSlippagePct,
         }
       );
+
+      // 限频强制平仓成功，重置状态和参数
+      this.positionSide = null;
+      this.entryBidQty = 0;
+      this.entryAskQty = 0;
+      this.currentTradeAmount = this.config.tradeAmount;
+      this.currentLossLimit = this.config.lossLimit;
     } catch (error) {
       if (isUnknownOrderError(error)) {
         this.tradeLog.push("order", "限频强制平仓时订单已不存在");

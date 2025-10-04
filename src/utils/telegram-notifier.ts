@@ -210,7 +210,7 @@ export class TelegramNotifier {
     }
 
     try {
-      const reductionPercent = (
+      const amountReductionPercent = (
         ((previousAmount - newAmount) / previousAmount) *
         100
       ).toFixed(0);
@@ -226,17 +226,22 @@ export class TelegramNotifier {
 📉 *调整信息*:
 • 原始数量: ${previousAmount.toFixed(8)}
 • 新数量: ${newAmount.toFixed(8)}
-• 减少: ${reductionPercent}%
+• 减少: ${amountReductionPercent}%
 • 尝试次数: ${attemptNumber}
 • 原因: ${reason}`;
 
       if (previousLossLimit !== undefined && newLossLimit !== undefined) {
+        const lossReductionPercent = (
+          ((previousLossLimit - newLossLimit) / previousLossLimit) *
+          100
+        ).toFixed(0);
+
         message += `
 
-🛡️ *止损调整*:
+🛡️ *止损调整* (按比例):
 • 原始止损: ${previousLossLimit.toFixed(4)} USDT
 • 新止损: ${newLossLimit.toFixed(4)} USDT
-• 减少: ${reductionPercent}%`;
+• 减少: ${lossReductionPercent}%`;
       }
 
       message += `
