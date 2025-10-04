@@ -120,13 +120,9 @@ export class DepthImbalanceEngine {
   ) {
     // 初始化交易数量
     this.currentTradeAmount = this.config.tradeAmount;
-    // 设置最小交易数量为初始值的 1/64（最多减半6次）
-    // 你可以根据需要调整这个值：
-    // - 1/32 = 最多减半5次（6次尝试）
-    // - 1/64 = 最多减半6次（7次尝试）
-    // - 1/128 = 最多减半7次（8次尝试）
-    this.minTradeAmount = this.config.tradeAmount / 128;
-    // 最大尝试次数：初始尝试 + 减半次数
+    // 设置最小交易数量为 0.001（交易所最小限制）
+    this.minTradeAmount = 0.001;
+    // 最大尝试次数
     this.maxRetryAttempts = 10;
     // 初始化止损限制（与交易数量同步调整）
     this.currentLossLimit = this.config.lossLimit;
@@ -553,10 +549,15 @@ export class DepthImbalanceEngine {
         attempts++;
 
         if (isInsufficientMarginError(error)) {
-          // 保证金不足，减半交易数量并按比例调整止损限制
+          // 保证金不足，交易量除以10并按比例调整止损限制
           const previousAmount = attemptAmount;
           const previousLossLimit = this.currentLossLimit;
-          attemptAmount = attemptAmount / 2;
+          attemptAmount = attemptAmount / 10;
+
+          // 确保不低于最小交易数量 0.001
+          if (attemptAmount < this.minTradeAmount) {
+            attemptAmount = this.minTradeAmount;
+          }
 
           // 按照交易量的比例调整止损
           // 例如: 交易量 0.1 BTC -> 止损 6 USDT
@@ -564,8 +565,13 @@ export class DepthImbalanceEngine {
           const ratio = attemptAmount / this.config.tradeAmount;
           this.currentLossLimit = this.config.lossLimit * ratio;
 
-          // 立即更新当前交易数量，避免下次建仓重复砍半和发送通知
+          // 立即更新当前交易数量，避免下次建仓重复砍和发送通知
           this.currentTradeAmount = attemptAmount;
+
+          const reductionPercent = (
+            ((previousAmount - attemptAmount) / previousAmount) *
+            100
+          ).toFixed(1);
 
           this.tradeLog.push(
             "warn",
@@ -573,7 +579,7 @@ export class DepthImbalanceEngine {
               this.maxRetryAttempts
             }）| 交易量 ${previousAmount.toFixed(8)} → ${attemptAmount.toFixed(
               8
-            )} (-50%) | 止损 ${previousLossLimit.toFixed(
+            )} (-${reductionPercent}%) | 止损 ${previousLossLimit.toFixed(
               4
             )} → ${this.currentLossLimit.toFixed(4)} USDT (${(
               ratio * 100
