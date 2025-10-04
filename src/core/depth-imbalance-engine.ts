@@ -436,14 +436,10 @@ export class DepthImbalanceEngine {
       } else {
         this.tradeLog.push("error", `市价建仓失败: ${String(error)}`);
       }
-      // 重置状态
+      // 重置状态（保持当前的交易量和止损，不重置）
       this.positionSide = null;
       this.entryBidQty = 0;
       this.entryAskQty = 0;
-
-      // 建仓失败，重置交易数量和止损限制为初始值
-      this.currentTradeAmount = this.config.tradeAmount;
-      this.currentLossLimit = this.config.lossLimit;
     }
   }
 
@@ -568,6 +564,9 @@ export class DepthImbalanceEngine {
           const ratio = attemptAmount / this.config.tradeAmount;
           this.currentLossLimit = this.config.lossLimit * ratio;
 
+          // 立即更新当前交易数量，避免下次建仓重复砍半和发送通知
+          this.currentTradeAmount = attemptAmount;
+
           this.tradeLog.push(
             "warn",
             `保证金不足（尝试 ${attempts}/${
@@ -636,25 +635,10 @@ export class DepthImbalanceEngine {
         }
       );
 
-      // 重置状态
+      // 重置状态（保持当前的交易量和止损，继续使用）
       this.positionSide = null;
       this.entryBidQty = 0;
       this.entryAskQty = 0;
-
-      // 平仓成功，重置交易数量和止损限制为初始值
-      // 这样下次建仓时会从完整的交易数量开始
-      const wasAdjusted = this.currentTradeAmount < this.config.tradeAmount;
-      this.currentTradeAmount = this.config.tradeAmount;
-      this.currentLossLimit = this.config.lossLimit;
-
-      if (wasAdjusted) {
-        this.tradeLog.push(
-          "info",
-          `平仓完成，重置交易参数 | 交易量=${this.currentTradeAmount.toFixed(
-            8
-          )} | 止损=${this.currentLossLimit.toFixed(4)} USDT`
-        );
-      }
     } catch (error) {
       if (isUnknownOrderError(error)) {
         this.tradeLog.push("order", "平仓订单已不存在");
@@ -690,12 +674,10 @@ export class DepthImbalanceEngine {
         }
       );
 
-      // 限频强制平仓成功，重置状态和参数
+      // 限频强制平仓成功，重置状态（保持当前交易量）
       this.positionSide = null;
       this.entryBidQty = 0;
       this.entryAskQty = 0;
-      this.currentTradeAmount = this.config.tradeAmount;
-      this.currentLossLimit = this.config.lossLimit;
     } catch (error) {
       if (isUnknownOrderError(error)) {
         this.tradeLog.push("order", "限频强制平仓时订单已不存在");
